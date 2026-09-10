@@ -36,9 +36,8 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Tenta carregar a logo local se existir
+# Logo Virbac
 NOME_ARQUIVO_LOGO = "logo.jpg"
-
 if os.path.exists(NOME_ARQUIVO_LOGO):
     st.sidebar.image(NOME_ARQUIVO_LOGO, width=180)
 else:
@@ -47,72 +46,58 @@ else:
 st.sidebar.subheader("Painel de Controle")
 st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e.")
 
-# Cabeçalho do Topo
-if os.path.exists(NOME_ARQUIVO_LOGO):
-    col_logo, col_tit = st.columns([1, 4])
-    with col_logo:
-        st.image(NOME_ARQUIVO_LOGO, width=130)
-    with col_tit:
-        st.markdown("""
-            <div class="main-header">
-                <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-                <div class="main-subtitle">Análise Detalhada por Produto, Cadastro SUFRAMA e Regras do PIN-e</div>
-            </div>
-        """, unsafe_allow_html=True)
-else:
-    st.markdown("""
-        <div class="main-header">
-            <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-            <div class="main-subtitle">Análise Detalhada por Produto, Cadastro SUFRAMA e Regras do PIN-e</div>
-        </div>
-    """, unsafe_allow_html=True)
+# Campo para entrada do Token da API CNPJá
+st.sidebar.subheader("🔑 Autenticação API")
+TOKEN_CNPJA = st.sidebar.text_input("Cole seu Token CNPJá:", type="password")
 
-# Consulta rápida de status do CNPJ (API CNPJ pública)
+# Cabeçalho do Topo
+st.markdown("""
+    <div class="main-header">
+        <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
+        <div class="main-subtitle">Consulta de Inscrição via CNPJá API, Regras do PIN-e e Análise por Produto</div>
+    </div>
+""", unsafe_allow_html=True)
+
+# Função para consultar a Inscrição SUFRAMA na CNPJá API
 @st.cache_data(ttl=3600)
-def consultar_status_cnpj(cnpj):
+def consultar_cnpja_api(cnpj, token=""):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
-        return {
-            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "CNPJ INVÁLIDO",
-            "cod_sit_cadastral": "00", "icms_benef": "NÃO", "icms_prop": "N/D",
-            "icms_base": "N/D", "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
-        }
-        
-    url = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
+        return {"isuf": "N/D", "situacao": "CNPJ INVÁLIDO", "dt_cad": "N/D"}
+    
+    if not token:
+        return {"isuf": "SEM TOKEN API", "situacao": "HABILITADO", "dt_cad": "N/D"}
+
+    url = f"https://api.cnpja.com/office/{cnpj_limpo}"
+    headers = {
+        "Authorization": token
+    }
+
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             dados = response.json()
-            situacao = dados.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa').upper()
-            dt_inc = dados.get('estabelecimento', {}).get('data_inicio_atividade', 'N/D')
-            is_ativo = situacao == "ATIVA"
+            
+            # Extração dos dados da SUFRAMA via retorno CNPJá
+            suframa_info = dados.get('suframa', {})
+            isuf = str(suframa_info.get('number', 'NÃO CADASTRADO'))
+            situacao = str(suframa_info.get('status', 'HABILITADO')).upper()
+            dt_cad = suframa_info.get('registrationDate', 'N/D')
             
             return {
-                "dt_cadastro": dt_inc,
-                "dt_aprovacao": dt_inc if is_ativo else "N/D",
-                "sit_cadastral": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
-                "cod_sit_cadastral": "01" if is_ativo else "02",
-                "icms_benef": "SIM" if is_ativo else "NÃO",
-                "icms_prop": "Incentivo Fiscal ZFM / ALC",
-                "icms_base": "Convênio ICMS 65/88 / Art. 4º Dec. 288/67",
-                "ipi_benef": "SIM" if is_ativo else "NÃO",
-                "ipi_prop": "Isenção IPI ZFM",
-                "ipi_base": "Art. 81 do RIPI/2010"
+                "isuf": isuf,
+                "situacao": "HABILITADO" if "ACTIVE" in situacao or "HABILITAD" in situacao or situacao == "TRUE" else situacao,
+                "dt_cad": dt_cad
             }
+        else:
+            return {"isuf": "ERRO AUTENTICAÇÃO API", "situacao": "HABILITADO", "dt_cad": "N/D"}
     except Exception:
-        pass
-
-    return {
-        "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "HABILITADO",
-        "cod_sit_cadastral": "01", "icms_benef": "SIM", "icms_prop": "ZFM/ALC",
-        "icms_base": "Legislação Estadual", "ipi_benef": "SIM", "ipi_prop": "Isenção IPI",
-        "ipi_base": "RIPI Art. 81"
-    }
+        return {"isuf": "TIMEOUT API", "situacao": "HABILITADO", "dt_cad": "N/D"}
 
 # Upload dos XMLs
 st.subheader("📤 Upload dos Arquivos XML")
 uploaded_files = st.file_uploader(
-    "Suba até 50 arquivos XML para análise item a item:", 
+    "Suba até 50 arquivos XML para processamento simultâneo:", 
     type=["xml"], 
     accept_multiple_files=True
 )
@@ -133,7 +118,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Processando arquivo {index + 1} de {total_files}: {file.name}")
+        status_text.text(f"Consultando API CNPJá e processando arquivo {index + 1} de {total_files}: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -158,16 +143,30 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # Consulta dados do destinatário
-            dados_suf = consultar_status_cnpj(cnpj_dest)
+            # CONSULTA NA API CNPJÁ
+            dados_cnpja = consultar_cnpja_api(cnpj_dest, TOKEN_CNPJA)
+            isuf_api = dados_cnpja["isuf"]
 
-            # Define Inscrição SUFRAMA tratada
+            # Lógica de Comparação da Inscrição SUFRAMA
+            isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
+            isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
+
             if isuf_xml not in ['Não informado', '', None]:
                 isuf_exibicao = isuf_xml
-                valida_isuf = "🟢 INFORMADA NO XML"
+                if isuf_api_limpo != "" and isuf_api_limpo != "SEM TOKEN API":
+                    if isuf_xml_limpo == isuf_api_limpo:
+                        status_valida_isuf = "🟢 VÁLIDO (XML coincide com a CNPJá API)"
+                    else:
+                        status_valida_isuf = f"🔴 DIVERGENTE (XML: {isuf_xml} | API CNPJá: {isuf_api})"
+                else:
+                    status_valida_isuf = "🟢 INFORMADO NO XML"
             else:
-                isuf_exibicao = "NÃO INFORMADO NO XML"
-                valida_isuf = "🟡 AUSENTE NO XML (Verificar CADSUF)"
+                if isuf_api_limpo != "" and isuf_api_limpo != "SEM TOKEN API":
+                    isuf_exibicao = isuf_api
+                    status_valida_isuf = "🟡 BUSCADO NA API CNPJá (Ausente no XML)"
+                else:
+                    isuf_exibicao = "NÃO INFORMADO NO XML"
+                    status_valida_isuf = "🔴 AUSENTE NO XML (Informe o Token na Barra Lateral)"
 
             # Processamento dos Itens
             detalhes = infNFe.get('det', [])
@@ -192,11 +191,11 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra de Exigência do PIN (Origem 0, 3, 4, 5 e 8)
+                # Regra de Exigência do PIN (Origens 0, 3, 4, 5 e 8)
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
-                elif "INATIVO" in dados_suf["sit_cadastral"] or "IRREGULAR" in dados_suf["sit_cadastral"]:
+                elif "INATIVO" in dados_cnpja["situacao"] or "IRREGULAR" in dados_cnpja["situacao"]:
                     status_pin_prod = "🔴 BLOQUEADO (Suframa Inativo)"
                 elif is_nacional:
                     status_pin_prod = "🟡 GERAR PIN (Obrigatório)"
@@ -216,18 +215,19 @@ if uploaded_files:
                     "Cidade Destino": cidade_dest,
                     "UF": uf_dest,
                     "CNPJ Destinatário": cnpj_dest,
-                    "Inscrição SUFRAMA (ISUF)": isuf_exibicao,
-                    "Status Validação ISUF": valida_isuf,
-                    "Data de Cadastro": dados_suf["dt_cadastro"],
-                    "Data de Aprovação": dados_suf["dt_aprovacao"],
-                    "Situação Cadastral": dados_suf["sit_cadastral"],
-                    "Código Situação Cadastral": dados_suf["cod_sit_cadastral"],
-                    "ICMS Benefício": dados_suf["icms_benef"],
-                    "ICMS Propósito": dados_suf["icms_prop"],
-                    "ICMS Base Legal": dados_suf["icms_base"],
-                    "IPI Benefício": dados_suf["ipi_benef"],
-                    "IPI Propósito": dados_suf["ipi_prop"],
-                    "IPI Base Legal": dados_suf["ipi_base"],
+                    "ISUF (XML)": isuf_xml,
+                    "ISUF (API CNPJá)": isuf_api,
+                    "Inscrição SUFRAMA Final": isuf_exibicao,
+                    "Status Validação ISUF": status_valida_isuf,
+                    "Data de Cadastro": dados_cnpja["dt_cad"],
+                    "Situação Cadastral": dados_cnpja["situacao"],
+                    "Código Situação Cadastral": "01" if dados_cnpja["situacao"] == "HABILITADO" else "02",
+                    "ICMS Benefício": "SIM" if uf_dest in ufs_suframa else "NÃO",
+                    "ICMS Propósito": "Incentivo Fiscal ZFM / ALC",
+                    "ICMS Base Legal": "Convênio ICMS 65/88",
+                    "IPI Benefício": "SIM" if uf_dest in ufs_suframa else "NÃO",
+                    "IPI Propósito": "Isenção IPI ZFM",
+                    "IPI Base Legal": "Art. 81 do RIPI/2010",
                     "Arquivo XML": file.name
                 })
 
@@ -237,8 +237,8 @@ if uploaded_files:
                 "UF": uf_dest,
                 "CNPJ Destinatário": cnpj_dest,
                 "Inscrição SUFRAMA": isuf_exibicao,
-                "Status Validação": valida_isuf,
-                "Situação Cadastral": dados_suf["sit_cadastral"],
+                "Validação Inscrição": status_valida_isuf,
+                "Situação Cadastral": dados_cnpja["situacao"],
                 "Itens com PIN": f"{itens_com_pin}/{len(detalhes)}",
                 "Diagnóstico NF": "🟡 GERAR PIN" if itens_com_pin > 0 else "🟢 DISPENSADO"
             })
@@ -257,7 +257,7 @@ if uploaded_files:
     df_nf = pd.DataFrame(relatorio_nfs)
 
     with tab1:
-        st.subheader("📋 Análise Item a Item (Validação de Produtos & PIN)")
+        st.subheader("📋 Análise Item a Item (Integração Oficial CNPJá API)")
         st.dataframe(df_prod, use_container_width=True)
         
         csv_prod = df_prod.to_csv(index=False).encode('utf-8')
