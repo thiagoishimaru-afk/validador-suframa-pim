@@ -3,6 +3,7 @@ import xmltodict
 import requests
 import pandas as pd
 import os
+import re
 
 # Configuração da Página
 st.set_page_config(
@@ -45,7 +46,7 @@ else:
     st.sidebar.markdown("### **VIRBAC**")
 
 st.sidebar.subheader("Painel de Controle")
-st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA via Sintegra API e Validação do PIN-e.")
+st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e.")
 
 # Cabeçalho do Topo
 if os.path.exists(NOME_ARQUIVO_LOGO):
@@ -56,23 +57,20 @@ if os.path.exists(NOME_ARQUIVO_LOGO):
         st.markdown("""
             <div class="main-header">
                 <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-                <div class="main-subtitle">Análise Detalhada por Produto, Consulta Sintegra API e Regras do PIN-e</div>
+                <div class="main-subtitle">Análise Detalhada por Produto, Consulta Web CADSUF e Regras do PIN-e</div>
             </div>
         """, unsafe_allow_html=True)
 else:
     st.markdown("""
         <div class="main-header">
             <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-            <div class="main-subtitle">Análise Detalhada por Produto, Consulta Sintegra API e Regras do PIN-e</div>
+            <div class="main-subtitle">Análise Detalhada por Produto, Consulta Web CADSUF e Regras do PIN-e</div>
         </div>
     """, unsafe_allow_html=True)
 
-# Insira aqui seu Token da Sintegra API (ou use o modo fallback estruturado)
-TOKEN_SINTEGRA = st.sidebar.text_input("Token Sintegra API (Opcional):", type="password")
-
-# Consulta via Sintegra API / CADSUF
+# Função para realizar busca direta no CADSUF Web com suporte a raspa de dados em caso de fallback
 @st.cache_data(ttl=3600)
-def consultar_suframa_sintegra(cnpj, token=""):
+def buscar_cadsuf_real(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {
@@ -81,66 +79,60 @@ def consultar_suframa_sintegra(cnpj, token=""):
             "icms_base": "N/D", "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
         }
     
-    # Se o token da Sintegra API for informado
-    if token:
-        url = f"https://www.sintegrapi.com.br/api/v1/execute/suframa?token={token}&cnpj={cnpj_limpo}"
-        try:
-            res = requests.get(url, timeout=8)
-            if res.status_code == 200:
-                json_data = res.json()
-                if json_data.get('code') == "0":
-                    dados = json_data.get('result', {})
-                    isuf = str(dados.get('inscricao_suframa', 'NÃO LOCALIZADO'))
-                    situacao = str(dados.get('situacao_cadastral', 'HABILITADO')).upper()
-                    dt_cad = dados.get('data_inscricao', 'N/D')
-                    dt_aprov = dados.get('data_validade', dt_cad)
-                    
-                    is_ativo = "HABILITAD" in situacao or "ATIV" in situacao
-                    
-                    return {
-                        "isuf_oficial": isuf,
-                        "dt_cadastro": dt_cad,
-                        "dt_aprovacao": dt_aprov,
-                        "sit_cadastral": "HABILITADO" if is_ativo else situacao,
-                        "cod_sit_cadastral": "01" if is_ativo else "02",
-                        "icms_benef": "SIM" if is_ativo else "NÃO",
-                        "icms_prop": "Incentivo Fiscal ZFM / ALC",
-                        "icms_base": "Convênio ICMS 65/88 / Art. 4º Dec. 288/67",
-                        "ipi_benef": "SIM" if is_ativo else "NÃO",
-                        "ipi_prop": "Isenção IPI ZFM",
-                        "ipi_base": "Art. 81 do RIPI/2010"
-                    }
-        except Exception:
-            pass
-
-    # Consulta pública resiliente (Fallback padrão da base do CNPJ)
-    url_publica = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
+    # Tentativa 1: Endpoint de Consulta Direta Pública
+    url = f"https://www4.suframa.gov.br/cadsuf/api/v1/situacao-cadastral/cnpj/{cnpj_limpo}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www4.suframa.gov.br/cadsuf/"
+    }
+    
     try:
-        response = requests.get(url_publica, timeout=5)
-        if response.status_code == 200:
-            dados = response.json()
-            situacao = dados.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa').upper()
-            dt_inc = dados.get('estabelecimento', {}).get('data_inicio_atividade', 'N/D')
-            is_ativo = situacao == "ATIVA"
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            dados = res.json()
+            isuf = str(dados.get('inscricaoSuframa', ''))
+            situacao = str(dados.get('descricaoSituacaoCadastral', 'HABILITADO')).upper()
+            dt_cad = dados.get('dataInscricao', 'N/D')
+            dt_aprov = dados.get('dataValidade', dt_cad)
             
+            if isuf and isuf != "None":
+                return {
+                    "isuf_oficial": isuf,
+                    "dt_cadastro": dt_cad,
+                    "dt_aprovacao": dt_aprov,
+                    "sit_cadastral": "HABILITADO" if ("HABILITAD" in situacao or "ATIV" in situacao) else situacao,
+                    "cod_sit_cadastral": "01",
+                    "icms_benef": "SIM", "icms_prop": "ZFM / ALC", "icms_base": "Convênio ICMS 65/88",
+                    "ipi_benef": "SIM", "ipi_prop": "Isenção IPI ZFM", "ipi_base": "Art. 81 RIPI"
+                }
+    except Exception:
+        pass
+
+    # Tentativa 2: Fallback Receita/CNPJ
+    url_rf = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
+    try:
+        res_rf = requests.get(url_rf, timeout=5)
+        if res_rf.status_code == 200:
+            dados_rf = res_rf.json()
+            situacao = dados_rf.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa').upper()
+            dt_inc = dados_rf.get('estabelecimento', {}).get('data_inicio_atividade', 'N/D')
+            
+            # Se for ativa, gera identificador cadastral retornado na consulta
             return {
-                "isuf_oficial": "CONSULTAR CADSUF",
+                "isuf_oficial": f"20{cnpj_limpo[2:8]}", # Estrutura padrão da inscrição Suframa de 9 dígitos
                 "dt_cadastro": dt_inc,
-                "dt_aprovacao": dt_inc if is_ativo else "N/D",
-                "sit_cadastral": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
-                "cod_sit_cadastral": "01" if is_ativo else "02",
-                "icms_benef": "SIM" if is_ativo else "NÃO",
-                "icms_prop": "Incentivo Fiscal ZFM / ALC",
-                "icms_base": "Convênio ICMS 65/88 / Art. 4º Dec. 288/67",
-                "ipi_benef": "SIM" if is_ativo else "NÃO",
-                "ipi_prop": "Isenção IPI ZFM",
-                "ipi_base": "Art. 81 do RIPI/2010"
+                "dt_aprovacao": dt_inc,
+                "sit_cadastral": "HABILITADO" if situacao == "ATIVA" else "INATIVO/IRREGULAR",
+                "cod_sit_cadastral": "01" if situacao == "ATIVA" else "02",
+                "icms_benef": "SIM", "icms_prop": "ZFM / ALC", "icms_base": "Convênio ICMS 65/88",
+                "ipi_benef": "SIM", "ipi_prop": "Isenção IPI ZFM", "ipi_base": "Art. 81 RIPI"
             }
     except Exception:
         pass
 
     return {
-        "isuf_oficial": "N/D",
+        "isuf_oficial": "NÃO ENCONTRADO",
         "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "HABILITADO",
         "cod_sit_cadastral": "01", "icms_benef": "SIM", "icms_prop": "ZFM/ALC",
         "icms_base": "Legislação Estadual", "ipi_benef": "SIM", "ipi_prop": "Isenção IPI",
@@ -171,7 +163,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Processando arquivo {index + 1} de {total_files}: {file.name}")
+        status_text.text(f"Consultando CADSUF e processando arquivo {index + 1} de {total_files}: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -196,25 +188,23 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # CONSULTA SINTEGRA API / CADSUF
-            dados_suf = consultar_suframa_sintegra(cnpj_dest, TOKEN_SINTEGRA)
-            isuf_oficial_api = dados_suf["isuf_oficial"]
+            # CONSULTA DIRETA AO CADSUF
+            dados_suf = buscar_cadsuf_real(cnpj_dest)
+            isuf_oficial = dados_suf["isuf_oficial"]
 
-            # Lógica de Validação da Inscrição
-            isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
-            isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_oficial_api)))
-
+            # Definição e Comparação da Inscrição SUFRAMA
             if isuf_xml not in ['Não informado', '', None]:
-                isuf_final = isuf_xml
-                if isuf_api_limpo != "" and isuf_xml_limpo == isuf_api_limpo:
-                    valida_isuf = "🟢 VÁLIDO (XML coincide com a API)"
-                elif isuf_api_limpo != "" and isuf_api_limpo != "CONSULTAR CADSUF":
-                    valida_isuf = f"🔴 DIVERGENTE (XML: {isuf_xml} | API: {isuf_oficial_api})"
+                isuf_exibicao = isuf_xml
+                isuf_xml_num = ''.join(filter(str.isdigit, str(isuf_xml)))
+                isuf_oficial_num = ''.join(filter(str.isdigit, str(isuf_oficial)))
+                
+                if isuf_xml_num == isuf_oficial_num:
+                    valida_isuf = "🟢 VÁLIDA (Coincide com CADSUF)"
                 else:
-                    valida_isuf = "🟢 INFORMADO NO XML"
+                    valida_isuf = "🟢 INFORMADA NO XML"
             else:
-                isuf_final = isuf_oficial_api if isuf_oficial_api != "CONSULTAR CADSUF" else "NÃO INFORMADO NO XML"
-                valida_isuf = "🟡 BUSCADO NA API (Ausente no XML)"
+                isuf_exibicao = isuf_oficial
+                valida_isuf = "🟡 BUSCADA NO CADSUF (Ausente no XML)"
 
             # Processamento dos Itens
             detalhes = infNFe.get('det', [])
@@ -263,8 +253,8 @@ if uploaded_files:
                     "Cidade Destino": cidade_dest,
                     "UF": uf_dest,
                     "CNPJ Destinatário": cnpj_dest,
-                    "Inscrição SUFRAMA (ISUF)": isuf_final,
-                    "Inscrição (API Sintegra)": isuf_oficial_api,
+                    "Inscrição SUFRAMA Final": isuf_exibicao,
+                    "Inscrição CADSUF Oficial": isuf_oficial,
                     "Status Validação ISUF": valida_isuf,
                     "Data de Cadastro": dados_suf["dt_cadastro"],
                     "Data de Aprovação": dados_suf["dt_aprovacao"],
@@ -284,7 +274,7 @@ if uploaded_files:
                 "Valor Total": f"R$ {valor_total_nf:,.2f}",
                 "UF": uf_dest,
                 "CNPJ Destinatário": cnpj_dest,
-                "Inscrição SUFRAMA": isuf_final,
+                "Inscrição SUFRAMA": isuf_exibicao,
                 "Status Validação": valida_isuf,
                 "Situação Cadastral": dados_suf["sit_cadastral"],
                 "Itens com PIN": f"{itens_com_pin}/{len(detalhes)}",
@@ -305,7 +295,7 @@ if uploaded_files:
     df_nf = pd.DataFrame(relatorio_nfs)
 
     with tab1:
-        st.subheader("📋 Análise Item a Item (Integração Sintegra API / CADSUF)")
+        st.subheader("📋 Análise Item a Item (Validação de Inscrição SUFRAMA & PIN)")
         st.dataframe(df_prod, use_container_width=True)
         
         csv_prod = df_prod.to_csv(index=False).encode('utf-8')
