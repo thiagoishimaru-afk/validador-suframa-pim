@@ -45,9 +45,9 @@ else:
     st.sidebar.markdown("### **VIRBAC**")
 
 st.sidebar.subheader("Painel de Controle")
-st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e via API CNPJá.")
+st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA via CNPJá e Validação do PIN-e.")
 
-# CHAVE API CNPJÁ FORNECIDA
+# TOKEN CONFIGURADO DA VIRBAC
 TOKEN_CONFIGURADO = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92ba-dfa2143724df"
 
 # Cabeçalho do Topo
@@ -58,82 +58,86 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Função recursiva para varrer o JSON retornado pela CNPJá procurando por SUFRAMA
-def buscar_isuf_no_json(obj):
+# Função recursiva para localizar dados SUFRAMA dentro de qualquer sub-nível do JSON da CNPJá
+def extrair_suframa_json(obj):
     if isinstance(obj, dict):
-        for chave, valor in obj.items():
-            if str(chave).lower() in ['suframa', 'isuf', 'inscricaosuframa']:
-                if isinstance(valor, dict):
-                    num = valor.get('number') or valor.get('inscricao') or valor.get('codigo') or valor.get('value')
+        for k, v in obj.items():
+            if str(k).lower() in ['suframa', 'isuf', 'inscricaosuframa']:
+                if isinstance(v, dict):
+                    num = v.get('number') or v.get('inscricao') or v.get('codigo') or v.get('value')
                     if num:
-                        return str(num), valor.get('status', 'HABILITADO'), valor.get('registrationDate', 'N/D')
-                elif isinstance(valor, (str, int)):
-                    return str(valor), "HABILITADO", "N/D"
-            
-            # Procura em arrays como 'registrations' ou 'inscricoes'
-            if str(chave).lower() in ['registrations', 'inscricoes', 'especiais'] and isinstance(valor, list):
-                for item in valor:
+                        return str(num), v.get('status', 'HABILITADO'), v.get('registrationDate', 'N/D')
+                elif isinstance(v, (str, int)) and str(v).strip() != "":
+                    return str(v), "HABILITADO", "N/D"
+
+            if str(k).lower() in ['registrations', 'inscricoes', 'especiais'] and isinstance(v, list):
+                for item in v:
                     if isinstance(item, dict):
-                        texto_item = str(item).upper()
-                        if 'SUFRAMA' in texto_item:
+                        texto = str(item).upper()
+                        if 'SUFRAMA' in texto:
                             num = item.get('number') or item.get('numero') or item.get('code')
                             if num:
                                 return str(num), item.get('status', 'HABILITADO'), item.get('date', 'N/D')
-            
-            # Busca recursiva em subníveis do JSON
-            if isinstance(valor, (dict, list)):
-                res, sit, dt = buscar_isuf_no_json(valor)
+
+            if isinstance(v, (dict, list)):
+                res, sit, dt = extrair_suframa_json(v)
                 if res:
                     return res, sit, dt
 
     elif isinstance(obj, list):
         for item in obj:
-            res, sit, dt = buscar_isuf_no_json(item)
+            res, sit, dt = extrair_suframa_json(item)
             if res:
                 return res, sit, dt
 
     return None, "HABILITADO", "N/D"
 
-# Função para consultar a API oficial da CNPJá com espera/retry
+# Função com DELAY estendido de 40 segundos para aguardar o processamento assíncrono do CNPJá
 @st.cache_data(ttl=3600)
-def consultar_suframa_cnpja_assincrono(cnpj):
+def consultar_apenas_suframa_cnpja(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {"isuf": "", "situacao": "CNPJ INVÁLIDO", "dt_cad": "N/D"}
     
     url = f"https://api.cnpja.com/office/{cnpj_limpo}"
-    headers = {
-        "Authorization": TOKEN_CONFIGURADO
-    }
+    headers = {"Authorization": TOKEN_CONFIGURADO}
 
-    # Tenta até 3 vezes com pequenas pausas para aguardar o JSON ser totalmente entregue
-    for tentativa in range(3):
+    # Polling estendido: 8 ciclos de 5 segundos = 40 segundos de tempo total de análise
+    max_ciclos = 8
+    delay_segundos = 5
+
+    for ciclo in range(max_ciclos):
         try:
             response = requests.get(url, headers=headers, timeout=12)
             
             if response.status_code == 200:
                 dados = response.json()
+                isuf, sit, dt = extrair_suframa_json(dados)
                 
-                # Executa a busca profunda dentro de todo o JSON recebido
-                isuf_encontrado, sit_suframa, dt_cad = buscar_isuf_no_json(dados)
+                # Se encontrou a Inscrição SUFRAMA no JSON, retorna imediatamente
+                if isuf:
+                    status_empresa = str(dados.get('status', {}).get('text', 'ATIVA')).upper()
+                    is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(sit).upper()
+                    return {
+                        "isuf": str(isuf),
+                        "situacao": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
+                        "dt_cad": dt
+                    }
                 
-                status_empresa = str(dados.get('status', {}).get('text', 'ATIVA')).upper()
-                is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(sit_suframa).upper()
+                # Se ainda não concluiu a busca no governo, aguarda o delay estendido
+                time.sleep(delay_segundos)
+                continue
 
-                return {
-                    "isuf": str(isuf_encontrado) if isuf_encontrado else "",
-                    "situacao": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
-                    "dt_cad": dt_cad
-                }
-            elif response.status_code == 202: # HTTP 202: Processando pesquisa, aguarde
-                time.sleep(2)
+            elif response.status_code == 202:
+                # HTTP 202: A API CNPJá está processando a pesquisa no governo
+                time.sleep(delay_segundos)
                 continue
             else:
                 break
         except Exception:
-            time.sleep(1)
+            time.sleep(delay_segundos)
             continue
-            
+
     return {"isuf": "", "situacao": "HABILITADO", "dt_cad": "N/D"}
 
 # Upload dos XMLs
@@ -152,6 +156,7 @@ if uploaded_files:
     relatorio_produtos = []
     relatorio_nfs = []
     
+    # Origens que exigem PIN no envio para a ZFM / ALC
     origens_nacionais = ['0', '3', '4', '5', '8']
     ufs_suframa = ['AM', 'AC', 'RO', 'RR', 'AP']
 
@@ -160,7 +165,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Consultando CNPJá API e aguardando retorno JSON ({index + 1} de {total_files}): {file.name}")
+        status_text.text(f"Consultando SUFRAMA no CNPJá (Aguardando análise de 40s) [{index + 1}/{total_files}]: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -185,11 +190,11 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # CONSULTA CNPJá API COM ESPERA DE PROCESSAMENTO
-            dados_cnpja = consultar_suframa_cnpja_assincrono(cnpj_dest)
+            # 1. BUSCA EXCLUSIVA DA INSCRIÇÃO SUFRAMA NA API DO CNPJÁ (COM DELAY DE 40s)
+            dados_cnpja = consultar_apenas_suframa_cnpja(cnpj_dest)
             isuf_api = dados_cnpja["isuf"]
 
-            # COMPARAÇÃO RIGOROSA (XML x CNPJá API)
+            # LÓGICA DE COMPARATIVO DA INSCRIÇÃO SUFRAMA (XML x CNPJá API)
             isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
             isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
 
@@ -210,7 +215,7 @@ if uploaded_files:
                     isuf_exibicao = "NÃO INFORMADO NO XML"
                     status_valida_isuf = "🔴 AUSENTE NO XML (Não localizado no CNPJá)"
 
-            # Processamento dos Itens
+            # 2. ANÁLISE INTERNA DA OBRIGATORIEDADE DO PIN-E FEITA PELO SCRIPT (PRODUTO A PRODUTO)
             detalhes = infNFe.get('det', [])
             if not isinstance(detalhes, list):
                 detalhes = [detalhes]
@@ -233,7 +238,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra de PIN por Produto (Origens 0, 3, 4, 5 e 8)
+                # Regra de PIN-e por Produto (Baseado na Origem 0, 3, 4, 5, 8 e UF ZFM)
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
