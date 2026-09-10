@@ -3,6 +3,7 @@ import xmltodict
 import requests
 import pandas as pd
 import os
+import time
 
 # Configuração da Página
 st.set_page_config(
@@ -57,9 +58,45 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Função para consultar a API oficial da CNPJá
+# Função recursiva para varrer o JSON retornado pela CNPJá procurando por SUFRAMA
+def buscar_isuf_no_json(obj):
+    if isinstance(obj, dict):
+        for chave, valor in obj.items():
+            if str(chave).lower() in ['suframa', 'isuf', 'inscricaosuframa']:
+                if isinstance(valor, dict):
+                    num = valor.get('number') or valor.get('inscricao') or valor.get('codigo') or valor.get('value')
+                    if num:
+                        return str(num), valor.get('status', 'HABILITADO'), valor.get('registrationDate', 'N/D')
+                elif isinstance(valor, (str, int)):
+                    return str(valor), "HABILITADO", "N/D"
+            
+            # Procura em arrays como 'registrations' ou 'inscricoes'
+            if str(chave).lower() in ['registrations', 'inscricoes', 'especiais'] and isinstance(valor, list):
+                for item in valor:
+                    if isinstance(item, dict):
+                        texto_item = str(item).upper()
+                        if 'SUFRAMA' in texto_item:
+                            num = item.get('number') or item.get('numero') or item.get('code')
+                            if num:
+                                return str(num), item.get('status', 'HABILITADO'), item.get('date', 'N/D')
+            
+            # Busca recursiva em subníveis do JSON
+            if isinstance(valor, (dict, list)):
+                res, sit, dt = buscar_isuf_no_json(valor)
+                if res:
+                    return res, sit, dt
+
+    elif isinstance(obj, list):
+        for item in obj:
+            res, sit, dt = buscar_isuf_no_json(item)
+            if res:
+                return res, sit, dt
+
+    return None, "HABILITADO", "N/D"
+
+# Função para consultar a API oficial da CNPJá com espera/retry
 @st.cache_data(ttl=3600)
-def consultar_suframa_cnpja(cnpj):
+def consultar_suframa_cnpja_assincrono(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {"isuf": "", "situacao": "CNPJ INVÁLIDO", "dt_cad": "N/D"}
@@ -69,49 +106,35 @@ def consultar_suframa_cnpja(cnpj):
         "Authorization": TOKEN_CONFIGURADO
     }
 
-    try:
-        response = requests.get(url, headers=headers, timeout=8)
-        
-        if response.status_code == 200:
-            dados = response.json()
+    # Tenta até 3 vezes com pequenas pausas para aguardar o JSON ser totalmente entregue
+    for tentativa in range(3):
+        try:
+            response = requests.get(url, headers=headers, timeout=12)
             
-            isuf_encontrado = None
-            sit_suframa = "HABILITADO"
-            dt_cad = "N/D"
+            if response.status_code == 200:
+                dados = response.json()
+                
+                # Executa a busca profunda dentro de todo o JSON recebido
+                isuf_encontrado, sit_suframa, dt_cad = buscar_isuf_no_json(dados)
+                
+                status_empresa = str(dados.get('status', {}).get('text', 'ATIVA')).upper()
+                is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(sit_suframa).upper()
 
-            # 1. Checa objeto direto suframa
-            suf = dados.get('suframa', {})
-            if isinstance(suf, dict) and suf.get('number'):
-                isuf_encontrado = suf.get('number')
-                sit_suframa = suf.get('status', 'HABILITADO')
-                dt_cad = suf.get('registrationDate', 'N/D')
-
-            # 2. Checa array de inscrições especiais (registrations / inscricoes)
-            if not isuf_encontrado:
-                registros = dados.get('registrations', []) or dados.get('inscricoes', [])
-                for reg in registros:
-                    if isinstance(reg, dict):
-                        tipo = str(reg.get('type', '')).upper()
-                        nome = str(reg.get('name', '')).upper()
-                        if 'SUFRAMA' in tipo or 'SUFRAMA' in nome:
-                            isuf_encontrado = reg.get('number') or reg.get('numero')
-                            sit_suframa = reg.get('status', 'HABILITADO')
-                            dt_cad = reg.get('date', 'N/D')
-                            break
-
-            status_empresa = str(dados.get('status', {}).get('text', 'ATIVA')).upper()
-            is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(sit_suframa).upper()
-
-            return {
-                "isuf": str(isuf_encontrado) if isuf_encontrado else "",
-                "situacao": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
-                "dt_cad": dt_cad
-            }
-        else:
-            return {"isuf": "", "situacao": "HABILITADO", "dt_cad": "N/D"}
+                return {
+                    "isuf": str(isuf_encontrado) if isuf_encontrado else "",
+                    "situacao": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
+                    "dt_cad": dt_cad
+                }
+            elif response.status_code == 202: # HTTP 202: Processando pesquisa, aguarde
+                time.sleep(2)
+                continue
+            else:
+                break
+        except Exception:
+            time.sleep(1)
+            continue
             
-    except Exception:
-        return {"isuf": "", "situacao": "HABILITADO", "dt_cad": "N/D"}
+    return {"isuf": "", "situacao": "HABILITADO", "dt_cad": "N/D"}
 
 # Upload dos XMLs
 st.subheader("📤 Upload dos Arquivos XML")
@@ -137,7 +160,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Consultando CNPJá API e processando arquivo {index + 1} de {total_files}: {file.name}")
+        status_text.text(f"Consultando CNPJá API e aguardando retorno JSON ({index + 1} de {total_files}): {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -162,11 +185,11 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # CONSULTA CNPJá API
-            dados_cnpja = consultar_suframa_cnpja(cnpj_dest)
+            # CONSULTA CNPJá API COM ESPERA DE PROCESSAMENTO
+            dados_cnpja = consultar_suframa_cnpja_assincrono(cnpj_dest)
             isuf_api = dados_cnpja["isuf"]
 
-            # LÓGICA RIGOROSA DE COMPARATIVO DE INSCRIÇÃO (XML x CNPJá API)
+            # COMPARAÇÃO RIGOROSA (XML x CNPJá API)
             isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
             isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
 
@@ -210,7 +233,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra de Exigência do PIN (Origens 0, 3, 4, 5 e 8)
+                # Regra de PIN por Produto (Origens 0, 3, 4, 5 e 8)
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
