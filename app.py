@@ -2,6 +2,7 @@ import streamlit as st
 import xmltodict
 import requests
 import pandas as pd
+import os
 
 # Configuração da Página
 st.set_page_config(
@@ -10,7 +11,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilização CSS personalizada
+# Estilização CSS personalizada (Cores Virbac)
 st.markdown("""
     <style>
     .main-header {
@@ -35,13 +36,37 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Cabeçalho da Aplicação
-st.markdown("""
-    <div class="main-header">
-        <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-        <div class="main-subtitle">Análise Detalhada por Produto, Cadastro SUFRAMA e Regras do PIN-e</div>
-    </div>
-""", unsafe_allow_html=True)
+# Tenta carregar a imagem local
+NOME_ARQUIVO_LOGO = "logo.jpg" # Se subiu como png, mude para "logo.png"
+
+# Exibe na Barra Lateral (Sidebar)
+if os.path.exists(NOME_ARQUIVO_LOGO):
+    st.sidebar.image(NOME_ARQUIVO_LOGO, width=180)
+else:
+    st.sidebar.markdown("### **VIRBAC**")
+
+st.sidebar.subheader("Painel de Controle")
+st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e para NFs de Entrada/Saída.")
+
+# Cabeçalho do Topo
+if os.path.exists(NOME_ARQUIVO_LOGO):
+    col_logo, col_tit = st.columns([1, 4])
+    with col_logo:
+        st.image(NOME_ARQUIVO_LOGO, width=130)
+    with col_tit:
+        st.markdown("""
+            <div class="main-header">
+                <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
+                <div class="main-subtitle">Análise Detalhada por Produto, Cadastro SUFRAMA e Regras do PIN-e</div>
+            </div>
+        """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+        <div class="main-header">
+            <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
+            <div class="main-subtitle">Análise Detalhada por Produto, Cadastro SUFRAMA e Regras do PIN-e</div>
+        </div>
+    """, unsafe_allow_html=True)
 
 # Função para consultar a situação cadastral do CNPJ na SUFRAMA
 @st.cache_data(ttl=3600)
