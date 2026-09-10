@@ -44,104 +44,82 @@ else:
     st.sidebar.markdown("### **VIRBAC**")
 
 st.sidebar.subheader("Painel de Controle")
-st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e.")
+st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e via API CNPJá.")
 
-# TOKEN PADRÃO VIRBAC
-TOKEN_DEFAULT = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92ba-dfa2143724df"
-
-st.sidebar.subheader("🔑 Autenticação API")
-TOKEN_CNPJA = st.sidebar.text_input("Token CNPJá:", value=TOKEN_DEFAULT, type="password")
+# CHAVE API CNPJÁ FORNECIDA
+TOKEN_CONFIGURADO = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92ba-dfa2143724df"
 
 # Cabeçalho do Topo
 st.markdown("""
     <div class="main-header">
         <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-        <div class="main-subtitle">Consulta de Inscrição via CNPJá API, Regras do PIN-e e Análise por Produto</div>
+        <div class="main-subtitle">Análise Detalhada por Produto, Consulta CNPJá API e Regras do PIN-e</div>
     </div>
 """, unsafe_allow_html=True)
 
-# Função de busca recursiva para localizar 'suframa' ou números de inscrição em qualquer nível do JSON
-def extrair_isuf_json(dados):
-    if isinstance(dados, dict):
-        # 1. Checa chave direta 'suframa'
-        for k, v in dados.items():
-            if k.lower() == 'suframa' and isinstance(v, dict):
-                num = v.get('number') or v.get('inscricao') or v.get('codigo') or v.get('id')
-                if num:
-                    return str(num), v.get('status', 'HABILITADO'), v.get('registrationDate', 'N/D')
-            if k.lower() == 'suframa' and isinstance(v, (str, int)):
-                return str(v), "HABILITADO", "N/D"
-
-        # 2. Checa no array 'registrations' ou 'inscricoes'
-        registros = dados.get('registrations') or dados.get('inscricoes') or []
-        if isinstance(registros, list):
-            for reg in registros:
-                if isinstance(reg, dict):
-                    texto_reg = str(reg).upper()
-                    if 'SUFRAMA' in texto_reg:
-                        num = reg.get('number') or reg.get('numero') or reg.get('code')
-                        if num:
-                            return str(num), reg.get('status', 'HABILITADO'), reg.get('date', 'N/D')
-
-        # 3. Varredura profunda em sub-dicionários
-        for k, v in dados.items():
-            if isinstance(v, (dict, list)):
-                res = extrair_isuf_json(v)
-                if res[0]:
-                    return res
-
-    elif isinstance(dados, list):
-        for item in dados:
-            res = extrair_isuf_json(item)
-            if res[0]:
-                return res
-
-    return None, "HABILITADO", "N/D"
-
-# Função principal de consulta à API CNPJá
+# Função para consultar a API oficial da CNPJá
 @st.cache_data(ttl=3600)
-def consultar_cnpja_api(cnpj, token):
+def consultar_suframa_cnpja(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {"isuf": "N/D", "situacao": "CNPJ INVÁLIDO", "dt_cad": "N/D"}
     
-    token_final = token.strip() if token else TOKEN_DEFAULT
     url = f"https://api.cnpja.com/office/{cnpj_limpo}"
-    headers = {"Authorization": token_final}
+    headers = {
+        "Authorization": TOKEN_CONFIGURADO
+    }
 
     try:
         response = requests.get(url, headers=headers, timeout=8)
         
-        # Fallback de cabeçalho com Bearer caso a API exija o formato Padrão
-        if response.status_code in [401, 403]:
-            headers = {"Authorization": f"Bearer {token_final}"}
-            response = requests.get(url, headers=headers, timeout=8)
-
         if response.status_code == 200:
             dados = response.json()
             
-            isuf, situacao_suf, dt_cad = extrair_isuf_json(dados)
-            
-            # Checagem de status cadastral da empresa
+            # Busca inscrição no nó suframa ou no array de inscrições especiais (registrations)
+            isuf_encontrado = None
+            sit_suframa = "HABILITADO"
+            dt_cad = "N/D"
+
+            # 1. Checa objeto direto suframa
+            suf = dados.get('suframa', {})
+            if isinstance(suf, dict) and suf.get('number'):
+                isuf_encontrado = suf.get('number')
+                sit_suframa = suf.get('status', 'HABILITADO')
+                dt_cad = suf.get('registrationDate', 'N/D')
+
+            # 2. Checa array de inscrições especiais (registrations / inscricoes)
+            if not isuf_encontrado:
+                registros = dados.get('registrations', []) or dados.get('inscricoes', [])
+                for reg in registros:
+                    if isinstance(reg, dict):
+                        tipo = str(reg.get('type', '')).upper()
+                        nome = str(reg.get('name', '')).upper()
+                        if 'SUFRAMA' in tipo or 'SUFRAMA' in nome:
+                            isuf_encontrado = reg.get('number') or reg.get('numero')
+                            sit_suframa = reg.get('status', 'HABILITADO')
+                            dt_cad = reg.get('date', 'N/D')
+                            break
+
             status_empresa = str(dados.get('status', {}).get('text', 'ATIVA')).upper()
-            is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(situacao_suf).upper()
+            is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(sit_suframa).upper()
 
             return {
-                "isuf": isuf if isuf else "NÃO LOCALIZADO",
+                "isuf": str(isuf_encontrado) if isuf_encontrado else "NÃO CADASTRADO",
                 "situacao": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
                 "dt_cad": dt_cad
             }
         elif response.status_code in [401, 403]:
-            return {"isuf": "ERRO TOKEN (401/403)", "situacao": "HABILITADO", "dt_cad": "N/D"}
+            return {"isuf": "TOKEN INVÁLIDO OU NÃO AUTORIZADO", "situacao": "HABILITADO", "dt_cad": "N/D"}
         else:
             return {"isuf": f"ERRO API ({response.status_code})", "situacao": "HABILITADO", "dt_cad": "N/D"}
+            
     except Exception:
         return {"isuf": "TIMEOUT API", "situacao": "HABILITADO", "dt_cad": "N/D"}
 
 # Upload dos XMLs
 st.subheader("📤 Upload dos Arquivos XML")
 uploaded_files = st.file_uploader(
-    "Suba até 50 arquivos XML para processamento simultâneo:", 
+    "Suba até 50 arquivos XML para análise item a item:", 
     type=["xml"], 
     accept_multiple_files=True
 )
@@ -187,11 +165,11 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # CONSULTA API CNPJÁ
-            dados_cnpja = consultar_cnpja_api(cnpj_dest, TOKEN_CNPJA)
+            # CONSULTA API CNPJÁ COM O TOKEN DA VIRBAC
+            dados_cnpja = consultar_suframa_cnpja(cnpj_dest)
             isuf_api = dados_cnpja["isuf"]
 
-            # LÓGICA DE COMPARAÇÃO DA INSCRIÇÃO SUFRAMA
+            # LÓGICA DE VALIDAÇÃO E COMPARATIVO DE INSCRIÇÃO
             isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
             isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
 
@@ -199,7 +177,7 @@ if uploaded_files:
                 isuf_exibicao = isuf_xml
                 if isuf_api_limpo != "" and isuf_api_limpo == isuf_xml_limpo:
                     status_valida_isuf = "🟢 VÁLIDO (XML coincide com a API CNPJá)"
-                elif isuf_api_limpo != "" and isuf_api != "NÃO LOCALIZADO":
+                elif isuf_api_limpo != "" and isuf_api != "NÃO CADASTRADO":
                     status_valida_isuf = f"🔴 DIVERGENTE (XML: {isuf_xml} | API: {isuf_api})"
                 else:
                     status_valida_isuf = "🟢 INFORMADO NO XML"
@@ -209,7 +187,7 @@ if uploaded_files:
                     status_valida_isuf = "🟡 BUSCADO NA API CNPJá (Preenchido no XML ausente)"
                 else:
                     isuf_exibicao = "NÃO INFORMADO NO XML"
-                    status_valida_isuf = "🔴 AUSENTE NO XML (CNPJ sem cadastro na API)"
+                    status_valida_isuf = "🔴 AUSENTE NO XML (CNPJ sem cadastro retornado)"
 
             # Processamento dos Itens
             detalhes = infNFe.get('det', [])
@@ -234,7 +212,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra de PIN por Produto (Origens 0, 3, 4, 5 e 8)
+                # Regra de Exigência do PIN (Origens 0, 3, 4, 5 e 8)
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
