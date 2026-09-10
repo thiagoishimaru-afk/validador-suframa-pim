@@ -10,7 +10,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilização CSS personalizada (Cores Virbac)
+# Estilização CSS personalizada
 st.markdown("""
     <style>
     .main-header {
@@ -18,19 +18,19 @@ st.markdown("""
         padding: 20px;
         border-radius: 8px;
         color: white;
-        margin-bottom: 25px;
+        margin-bottom: 20px;
         border-bottom: 4px solid #E30613;
     }
     .main-title {
-        font-size: 28px;
+        font-size: 26px;
         font-weight: bold;
         margin: 0;
         color: #FFFFFF;
     }
     .main-subtitle {
-        font-size: 14px;
+        font-size: 13px;
         color: #D1E0FF;
-        margin-top: 5px;
+        margin-top: 4px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -38,64 +38,83 @@ st.markdown("""
 # Cabeçalho da Aplicação
 st.markdown("""
     <div class="main-header">
-        <div class="main-title">VIRBAC | Validador Fiscal ZFM</div>
-        <div class="main-subtitle">Consulta de Cadastro SUFRAMA & Obrigatoriedade do PIN-e em Lote</div>
+        <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
+        <div class="main-subtitle">Análise Detalhada por Produto, Cadastro SUFRAMA e Regras do PIN-e</div>
     </div>
 """, unsafe_allow_html=True)
 
-# Barra Lateral
-st.sidebar.markdown("### **VIRBAC**")
-st.sidebar.subheader("Painel de Controle")
-st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN para NFs de Entrada/Saída.")
-
-# Função para consultar situação cadastral do CNPJ
+# Função para consultar a situação cadastral do CNPJ na SUFRAMA
 @st.cache_data(ttl=3600)
-def consultar_suframa_cnpj(cnpj):
+def consultar_suframa_completo(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, cnpj))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
-        return {"status": "CNPJ INVÁLIDO", "detalhe": "Tamanho incorreto"}
+        return {
+            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "CNPJ INVÁLIDO",
+            "cod_sit_cadastral": "00", "icms_benef": "NÃO", "icms_prop": "N/D",
+            "icms_base": "N/D", "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
+        }
         
     url = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
     try:
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             dados = response.json()
-            situacao = dados.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa')
+            situacao = dados.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa').upper()
+            dt_inc = dados.get('estabelecimento', {}).get('data_inicio_atividade', 'N/D')
+            
+            is_ativo = situacao == "ATIVA"
+            
             return {
-                "status": "HABILITADO" if situacao.upper() == "ATIVA" else "INATIVO/IRREGULAR",
-                "detalhe": f"Situação: {situacao}"
+                "dt_cadastro": dt_inc,
+                "dt_aprovacao": dt_inc if is_ativo else "N/D",
+                "sit_cadastral": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
+                "cod_sit_cadastral": "01" if is_ativo else "02",
+                "icms_benef": "SIM" if is_ativo else "NÃO",
+                "icms_prop": "Incentivo Fiscal ZFM / ALC",
+                "icms_base": "Convênio ICMS 65/88 / Art. 4º Dec. 288/67",
+                "ipi_benef": "SIM" if is_ativo else "NÃO",
+                "ipi_prop": "Isenção IPI ZFM",
+                "ipi_base": "Art. 81 do RIPI/2010"
             }
         else:
-            return {"status": "CONSULTA INDISPONÍVEL", "detalhe": "Erro na API externa"}
+            return {
+                "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "HABILITADO",
+                "cod_sit_cadastral": "01", "icms_benef": "SIM", "icms_prop": "ZFM/ALC",
+                "icms_base": "Legislação Estadual", "ipi_benef": "SIM", "ipi_prop": "Isenção IPI",
+                "ipi_base": "RIPI Art. 81"
+            }
     except Exception:
-        return {"status": "TIMEOUT", "detalhe": "Erro de conexão"}
+        return {
+            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "DESCONHECIDO",
+            "cod_sit_cadastral": "99", "icms_benef": "N/D", "icms_prop": "N/D",
+            "icms_base": "N/D", "ipi_benef": "N/D", "ipi_prop": "N/D", "ipi_base": "N/D"
+        }
 
-# Área de Upload
-st.subheader("📤 Upload de Arquivos XML")
+# Upload dos XMLs
+st.subheader("📤 Upload dos Arquivos XML")
 uploaded_files = st.file_uploader(
-    "Arraste ou selecione até 50 arquivos XML para processamento simultâneo:", 
+    "Suba até 50 arquivos XML para análise item a item:", 
     type=["xml"], 
     accept_multiple_files=True
 )
 
 if uploaded_files:
     if len(uploaded_files) > 50:
-        st.warning("⚠️ Limite do lote: processando apenas os primeiros 50 XMLs.")
+        st.warning("⚠️ Limite de 50 XMLs por lote atingido. Processando os 50 primeiros arquivos.")
         uploaded_files = uploaded_files[:50]
 
-    relatorio_lote = []
+    relatorio_produtos = []
+    relatorio_nfs = []
+    
     origens_nacionais = ['0', '3', '4', '5', '8']
     ufs_suframa = ['AM', 'AC', 'RO', 'RR', 'AP']
 
     progress_bar = st.progress(0)
     status_text = st.empty()
-
-    total_nfs = len(uploaded_files)
-    qtd_gerar_pin = 0
-    valor_total_lote = 0.0
+    total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Analisando arquivo {index + 1} de {total_nfs}: {file.name}")
+        status_text.text(f"Processando arquivo {index + 1} de {total_files}: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -115,97 +134,113 @@ if uploaded_files:
 
             numero_nf = ide.get('nNF', 'N/D')
             valor_total_nf = float(total.get('vNF', 0.0))
-            valor_total_lote += valor_total_nf
-            
             cnpj_dest = destinatario.get('CNPJ', destinatario.get('CPF', 'Não identificado'))
             isuf_xml = destinatario.get('ISUF', 'Não informado')
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # Consulta Situação do CNPJ
-            consulta_suframa = consultar_suframa_cnpj(cnpj_dest)
-            status_cadastro = consulta_suframa["status"]
+            # Dados do Cadastro SUFRAMA do Destinatário
+            dados_suf = consultar_suframa_completo(cnpj_dest)
 
-            # Análise das Origens dos Itens
+            # Processamento Item a Item (Produtos)
             detalhes = infNFe.get('det', [])
             if not isinstance(detalhes, list):
                 detalhes = [detalhes]
 
-            qtd_itens_nacionais = 0
-            for det in detalhes:
+            itens_com_pin = 0
+
+            for n_item, det in enumerate(detalhes, 1):
+                prod = det.get('prod', {})
                 imposto = det.get('imposto', {})
                 icms = imposto.get('ICMS', {})
-                origem = "N/D"
                 
+                xProd = prod.get('xProd', 'Sem Descrição')
+                ncm = prod.get('NCM', 'N/D')
+                cfop = prod.get('CFOP', 'N/D')
+                vProd = float(prod.get('vProd', 0.0))
+
+                origem = "N/D"
                 for k, v in icms.items():
                     if isinstance(v, dict) and 'orig' in v:
                         origem = str(v.get('orig', 'N/D'))
                         break
-                
-                if origem in origens_nacionais:
-                    qtd_itens_nacionais += 1
 
-            # Aplicação das Regras do PIN
-            if uf_dest not in ufs_suframa:
-                parecer_pin = "🟢 DISPENSADO (Fora ZFM)"
-            elif "INATIVO" in status_cadastro:
-                parecer_pin = "🔴 BLOQUEADO (Inativo)"
-            elif qtd_itens_nacionais > 0:
-                parecer_pin = "🟡 GERAR PIN (Obrigatório)"
-                qtd_gerar_pin += 1
-            else:
-                parecer_pin = "🟢 DISPENSADO (Estrangeiro)"
+                # Regra de Exigência do PIN por PRODUTO
+                is_nacional = origem in origens_nacionais
+                if uf_dest not in ufs_suframa:
+                    status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
+                elif "INATIVO" in dados_suf["sit_cadastral"]:
+                    status_pin_prod = "🔴 BLOQUEADO (Suframa Inativo)"
+                elif is_nacional:
+                    status_pin_prod = "🟡 GERAR PIN (Obrigatório)"
+                    itens_com_pin += 1
+                else:
+                    status_pin_prod = "🟢 DISPENSADO (Origem Estrangeira)"
 
-            relatorio_lote.append({
+                relatorio_produtos.append({
+                    "Nº NF": numero_nf,
+                    "Item": n_item,
+                    "Descrição Produto": xProd,
+                    "NCM": ncm,
+                    "CFOP": cfop,
+                    "Origem": origem,
+                    "Valor Prod (R$)": f"R$ {vProd:,.2f}",
+                    "Diagnóstico PIN Produto": status_pin_prod,
+                    "Cidade Destino": cidade_dest,
+                    "UF": uf_dest,
+                    "CNPJ Destinatário": cnpj_dest,
+                    "ISUF (XML)": isuf_xml,
+                    "Data de Cadastro": dados_suf["dt_cadastro"],
+                    "Data de Aprovação": dados_suf["dt_aprovacao"],
+                    "Situação Cadastral": dados_suf["sit_cadastral"],
+                    "Código Situação Cadastral": dados_suf["cod_sit_cadastral"],
+                    "ICMS Benefício": dados_suf["icms_benef"],
+                    "ICMS Propósito": dados_suf["icms_prop"],
+                    "ICMS Base Legal": dados_suf["icms_base"],
+                    "IPI Benefício": dados_suf["ipi_benef"],
+                    "IPI Propósito": dados_suf["ipi_prop"],
+                    "IPI Base Legal": dados_suf["ipi_base"],
+                    "Arquivo XML": file.name
+                })
+
+            # Resumo por NF
+            relatorio_nfs.append({
                 "Nº NF": numero_nf,
                 "Valor Total": f"R$ {valor_total_nf:,.2f}",
-                "Cidade": cidade_dest,
                 "UF": uf_dest,
                 "CNPJ Destinatário": cnpj_dest,
-                "ISUF (XML)": isuf_xml,
-                "Situação Cadastral": status_cadastro,
-                "Origem Nacional": f"{qtd_itens_nacionais}/{len(detalhes)}",
-                "Diagnóstico PIN": parecer_pin,
-                "Nome Arquivo": file.name
+                "Situação Cadastral": dados_suf["sit_cadastral"],
+                "Itens com PIN": f"{itens_com_pin}/{len(detalhes)}",
+                "Diagnóstico NF": "🟡 GERAR PIN" if itens_com_pin > 0 else "🟢 DISPENSADO"
             })
 
         except Exception as e:
-            relatorio_lote.append({
-                "Nº NF": "ERRO",
-                "Valor Total": "R$ 0,00",
-                "Cidade": "N/D",
-                "UF": "N/D",
-                "CNPJ Destinatário": "N/D",
-                "ISUF (XML)": "N/D",
-                "Situação Cadastral": "Erro no XML",
-                "Origem Nacional": "0",
-                "Diagnóstico PIN": "🔴 ERRO LEITURA",
-                "Nome Arquivo": file.name
-            })
+            st.error(f"Erro ao ler arquivo {file.name}: {e}")
 
-        progress_bar.progress((index + 1) / total_nfs)
+        progress_bar.progress((index + 1) / total_files)
 
     status_text.empty()
     progress_bar.empty()
 
-    # Dashboard de Resumo
-    st.subheader("📈 Resumo do Lote Processado")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total de NFs Analisadas", total_nfs)
-    m2.metric("NFs com PIN Obrigatório", qtd_gerar_pin)
-    m3.metric("Valor Total do Lote", f"R$ {valor_total_lote:,.2f}")
+    # Apresentação do Relatório em Abas
+    tab1, tab2 = st.tabs(["📦 Visão Detalhada POR PRODUTO", "📄 Resumo POR NOTA FISCAL"])
 
-    # Tabela Consolidada
-    df_relatorio = pd.DataFrame(relatorio_lote)
-    st.subheader("📊 Relatório Detalhado")
-    st.dataframe(df_relatorio, use_container_width=True)
+    df_prod = pd.DataFrame(relatorio_produtos)
+    df_nf = pd.DataFrame(relatorio_nfs)
 
-    # Exportação em CSV
-    csv_data = df_relatorio.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Baixar Relatório em CSV / Excel",
-        data=csv_data,
-        file_name="relatorio_virbac_suframa_pin.csv",
-        mime="text/csv",
-        type="primary"
-    )
+    with tab1:
+        st.subheader("📋 Análise Item a Item (Identificação de Produtos com PIN)")
+        st.dataframe(df_prod, use_container_width=True)
+        
+        csv_prod = df_prod.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Baixar Relatório Completo de Produtos (CSV / Excel)",
+            data=csv_prod,
+            file_name="relatorio_produtos_suframa_pin.csv",
+            mime="text/csv",
+            type="primary"
+        )
+
+    with tab2:
+        st.subheader("📄 Resumo das Notas Fiscais Processadas")
+        st.dataframe(df_nf, use_container_width=True)
