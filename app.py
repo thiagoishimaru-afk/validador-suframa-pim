@@ -67,30 +67,41 @@ else:
         </div>
     """, unsafe_allow_html=True)
 
-# Função para consultar apenas a situação cadastral ativa na Receita/Suframa
+# FUNÇÃO REAVALIDADA: Consulta direta na API Interna do CADSUF (Suframa)
 @st.cache_data(ttl=3600)
-def consultar_status_cnpj(cnpj):
-    cnpj_limpo = ''.join(filter(str.isdigit, cnpj))
+def consultar_suframa_oficial(cnpj):
+    cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {
-            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "CNPJ INVÁLIDO",
+            "isuf_oficial": "N/D", "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "CNPJ INVÁLIDO",
             "cod_sit_cadastral": "00", "icms_benef": "NÃO", "icms_prop": "N/D",
             "icms_base": "N/D", "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
         }
         
-    url = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
+    url = f"https://www4.suframa.gov.br/cadsuf/api/v1/situacao-cadastral/cnpj/{cnpj_limpo}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json, text/plain, */*"
+    }
+    
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             dados = response.json()
-            situacao = dados.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa').upper()
-            dt_inc = dados.get('estabelecimento', {}).get('data_inicio_atividade', 'N/D')
-            is_ativo = situacao == "ATIVA"
+            
+            # Mapeamento do JSON oficial da Suframa
+            isuf_oficial = str(dados.get('inscricaoSuframa', 'NÃO ENCONTRADA'))
+            situacao = str(dados.get('descricaoSituacaoCadastral', 'Ativo')).upper()
+            dt_inc = dados.get('dataInscricao', 'N/D')
+            dt_aprov = dados.get('dataValidade', dados.get('dataSituacao', dt_inc))
+            
+            is_ativo = "HABILITAD" in situacao or "ATIV" in situacao
             
             return {
+                "isuf_oficial": isuf_oficial,
                 "dt_cadastro": dt_inc,
-                "dt_aprovacao": dt_inc if is_ativo else "N/D",
-                "sit_cadastral": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
+                "dt_aprovacao": dt_aprov,
+                "sit_cadastral": "HABILITADO" if is_ativo else situacao,
                 "cod_sit_cadastral": "01" if is_ativo else "02",
                 "icms_benef": "SIM" if is_ativo else "NÃO",
                 "icms_prop": "Incentivo Fiscal ZFM / ALC",
@@ -100,15 +111,17 @@ def consultar_status_cnpj(cnpj):
                 "ipi_base": "Art. 81 do RIPI/2010"
             }
         else:
+            # Fallback caso ocorra oscilação na API da Suframa
             return {
-                "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "HABILITADO",
-                "cod_sit_cadastral": "01", "icms_benef": "SIM", "icms_prop": "ZFM/ALC",
-                "icms_base": "Legislação Estadual", "ipi_benef": "SIM", "ipi_prop": "Isenção IPI",
-                "ipi_base": "RIPI Art. 81"
+                "isuf_oficial": "NÃO LOCALIZADO",
+                "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "NÃO ENCONTRADO",
+                "cod_sit_cadastral": "02", "icms_benef": "NÃO", "icms_prop": "N/D",
+                "icms_base": "N/D", "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
             }
     except Exception:
         return {
-            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "DESCONHECIDO",
+            "isuf_oficial": "ERRO CONEXÃO",
+            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "TIMEOUT CADSUF",
             "cod_sit_cadastral": "99", "icms_benef": "N/D", "icms_prop": "N/D",
             "icms_base": "N/D", "ipi_benef": "N/D", "ipi_prop": "N/D", "ipi_base": "N/D"
         }
@@ -137,7 +150,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Processando arquivo {index + 1} de {total_files}: {file.name}")
+        status_text.text(f"Consultando CADSUF e processando arquivo {index + 1} de {total_files}: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -162,16 +175,25 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # Consulta Status
-            dados_suf = consultar_status_cnpj(cnpj_dest)
+            # CONSULTA DIRETA AO CADSUF DA SUFRAMA
+            dados_suf = consultar_suframa_oficial(cnpj_dest)
+            isuf_oficial_cadsuf = dados_suf["isuf_oficial"]
 
-            # Lógica corrigida de Inscrição SUFRAMA
-            if isuf_xml not in ['Não informado', '', None]:
-                isuf_final = isuf_xml
-                valida_isuf = "🟢 INFORMADA NO XML (VÁLIDA)"
+            # Lógica de Validação e Comparação de Inscrições
+            isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
+            isuf_oficial_limpo = ''.join(filter(str.isdigit, str(isuf_oficial_cadsuf)))
+
+            if isuf_xml in ['Não informado', '', None]:
+                isuf_final = isuf_oficial_cadsuf
+                valida_isuf = "🟡 BUSCADO NO CADSUF (Ausente no XML)"
             else:
-                isuf_final = "NÃO INFORMADO NO XML"
-                valida_isuf = "🟡 AUSENTE NO XML (Verificar no CADSUF)"
+                isuf_final = isuf_xml
+                if isuf_xml_limpo == isuf_oficial_limpo and isuf_oficial_limpo != "":
+                    valida_isuf = "🟢 VÁLIDO (XML coincide com CADSUF)"
+                elif isuf_oficial_limpo != "":
+                    valida_isuf = f"🔴 DIVERGENTE (XML: {isuf_xml} | CADSUF: {isuf_oficial_cadsuf})"
+                else:
+                    valida_isuf = "🟢 INFORMADO NO XML"
 
             # Processamento dos Itens
             detalhes = infNFe.get('det', [])
@@ -200,7 +222,7 @@ if uploaded_files:
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
-                elif "INATIVO" in dados_suf["sit_cadastral"]:
+                elif "INATIVO" in dados_suf["sit_cadastral"] or "NÃO" in dados_suf["sit_cadastral"]:
                     status_pin_prod = "🔴 BLOQUEADO (Suframa Inativo)"
                 elif is_nacional:
                     status_pin_prod = "🟡 GERAR PIN (Obrigatório)"
@@ -220,8 +242,9 @@ if uploaded_files:
                     "Cidade Destino": cidade_dest,
                     "UF": uf_dest,
                     "CNPJ Destinatário": cnpj_dest,
-                    "Inscrição SUFRAMA (ISUF)": isuf_final,
-                    "Status ISUF": valida_isuf,
+                    "ISUF (XML)": isuf_xml,
+                    "Inscrição SUFRAMA (CADSUF)": isuf_oficial_cadsuf,
+                    "Status Validação ISUF": valida_isuf,
                     "Data de Cadastro": dados_suf["dt_cadastro"],
                     "Data de Aprovação": dados_suf["dt_aprovacao"],
                     "Situação Cadastral": dados_suf["sit_cadastral"],
@@ -240,7 +263,9 @@ if uploaded_files:
                 "Valor Total": f"R$ {valor_total_nf:,.2f}",
                 "UF": uf_dest,
                 "CNPJ Destinatário": cnpj_dest,
-                "Inscrição SUFRAMA": isuf_final,
+                "ISUF (XML)": isuf_xml,
+                "Inscrição CADSUF": isuf_oficial_cadsuf,
+                "Status Validação": valida_isuf,
                 "Situação Cadastral": dados_suf["sit_cadastral"],
                 "Itens com PIN": f"{itens_com_pin}/{len(detalhes)}",
                 "Diagnóstico NF": "🟡 GERAR PIN" if itens_com_pin > 0 else "🟢 DISPENSADO"
@@ -260,7 +285,7 @@ if uploaded_files:
     df_nf = pd.DataFrame(relatorio_nfs)
 
     with tab1:
-        st.subheader("📋 Análise Item a Item (Identificação de Produtos com PIN)")
+        st.subheader("📋 Análise Item a Item (Validação Direta no CADSUF Oficial)")
         st.dataframe(df_prod, use_container_width=True)
         
         csv_prod = df_prod.to_csv(index=False).encode('utf-8')
