@@ -13,10 +13,19 @@ if uploaded_file is not None:
     try:
         data = xmltodict.parse(uploaded_file.read())
         
-        # Extração de campos padrão de NF-e
-        infNFe = data['NFe']['infNFe']
-        cnpj_dest = infNFe['dest'].get('CNPJ', 'Não identificado')
-        isuf = infNFe['dest'].get('ISUF', 'Não informado')
+        # Trata as variações da estrutura do XML (com nfeProc ou direto NFe)
+        if 'nfeProc' in data:
+            nfe_data = data['nfeProc']['NFe']
+        elif 'NFe' in data:
+            nfe_data = data['NFe']
+        else:
+            nfe_data = data
+
+        infNFe = nfe_data['infNFe']
+        destinatario = infNFe.get('dest', {})
+        
+        cnpj_dest = destinatario.get('CNPJ', destinatario.get('CPF', 'Não identificado'))
+        isuf = destinatario.get('ISUF', 'Não informado')
         
         st.success(f"XML Carregado com Sucesso! CNPJ Destinatário: {cnpj_dest} | ISUF: {isuf}")
         
