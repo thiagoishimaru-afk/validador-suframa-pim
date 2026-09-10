@@ -1,3 +1,20 @@
+"suframa": [
+  {
+    "number": "200145711",
+    "since": "2018-09-03",
+    "status": {"id": 1, "text": "Ativa"},
+    "incentives": [...]
+  }
+]
+```[cite: 2]
+
+---
+
+### **Código Definitivo e Ajustado (`app.py`)**
+
+Substitua todo o conteúdo do seu `app.py` no GitHub por este código. Ele faz a chamada à API solicitando o módulo da SUFRAMA via parâmetro de URL e possui um mecanismo de **retentativa com espera de 40 segundos** caso o servidor da CNPJá esteja processando a busca no governo em tempo real.
+
+```python
 import streamlit as st
 import xmltodict
 import requests
@@ -58,15 +75,12 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Função para extrair a estrutura exata do JSON devolvido pelo CNPJá
-def extrair_dados_suframa_cnpja(json_data, cnpj_alvo):
-    cnpj_alvo_limpo = ''.join(filter(str.isdigit, str(cnpj_alvo)))
+# Função para extrair a estrutura exata do JSON devolvido pela CNPJá
+def processar_json_cnpja(json_data):
     itens = json_data if isinstance(json_data, list) else [json_data]
     
     for item in itens:
-        tax_id = ''.join(filter(str.isdigit, str(item.get('taxId', ''))))
-        
-        if not cnpj_alvo_limpo or tax_id == cnpj_alvo_limpo or len(itens) == 1:
+        if isinstance(item, dict):
             list_suframa = item.get('suframa', [])
             
             if list_suframa and len(list_suframa) > 0:
@@ -97,57 +111,64 @@ def extrair_dados_suframa_cnpja(json_data, cnpj_alvo):
                     "dt_cad": since[:10] if since != 'N/D' else 'N/D',
                     "icms_benef": icms_benef, "icms_prop": icms_prop, "icms_base": icms_base,
                     "ipi_benef": ipi_benef, "ipi_prop": ipi_prop, "ipi_base": ipi_base,
-                    "encontrado": True if number else False
+                    "sucesso": True if number else False
                 }
 
     return {
         "isuf": "", "situacao": "HABILITADO", "dt_cad": "N/D",
         "icms_benef": "NÃO", "icms_prop": "N/D", "icms_base": "N/D",
         "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D",
-        "encontrado": False
+        "sucesso": False
     }
 
-# Função de Chamada com Polling e Espera Ativa de até 40 segundos
+# Consulta na API CNPJá forçando a fonte da SUFRAMA e executando Polling de até 40s
 @st.cache_data(ttl=3600)
-def consultar_api_cnpja_com_espera(cnpj):
+def consultar_suframa_cnpja_api(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
-        return extrair_dados_suframa_cnpja({}, cnpj)
+        return processar_json_cnpja({})
     
-    url = f"https://api.cnpja.com/office/{cnpj_limpo}"
+    # URL configurada com parâmetro para forçar a raspagem do módulo SUFRAMA
+    url = f"https://api.cnpja.com/office/{cnpj_limpo}?strategy=cache&maxAge=45&sources=suframa"
     headers = {"Authorization": TOKEN_CONFIGURADO}
 
-    # Polling: Tenta 8 vezes com intervalo de 5 segundos entre cada consulta (Total: 40 segundos)
+    # Polling: 8 ciclos de 5 segundos = 40 segundos de tempo limite
     max_tentativas = 8
-    intervalo_segundos = 5
+    delay = 5
 
     for tentativa in range(max_tentativas):
         try:
             response = requests.get(url, headers=headers, timeout=12)
+            
+            # Se a rota com parâmetros falhar por conta do plano, faz fallback para o nó padrão /office/
+            if response.status_code in [400, 404]:
+                url_fallback = f"https://api.cnpja.com/office/{cnpj_limpo}"
+                response = requests.get(url_fallback, headers=headers, timeout=12)
+
             if response.status_code == 200:
                 dados = response.json()
-                resultado = extrair_dados_suframa_cnpja(dados, cnpj_limpo)
+                resultado = processar_json_cnpja(dados)
                 
-                # Se encontrou os dados da SUFRAMA no JSON, encerra a busca e retorna imediatamente
-                if resultado["encontrado"]:
+                # Se encontrou a Inscrição SUFRAMA, encerra o loop e retorna imediatamente
+                if resultado["sucesso"]:
                     return resultado
                 
-                # Se ainda não encontrou e não atingiu o limite de tentativas, aguarda o CNPJá concluir a raspagem
+                # Se o CNPJá está processando a raspagem em segundo plano, aguarda 5 segundos
                 if tentativa < max_tentativas - 1:
-                    time.sleep(intervalo_segundos)
+                    time.sleep(delay)
                     continue
 
             elif response.status_code == 202:
-                # HTTP 202: A API do CNPJá sinaliza que a consulta ainda está sendo processada no governo
-                time.sleep(intervalo_segundos)
+                # Código 202: A API do CNPJá está aguardando o retorno do governo
+                time.sleep(delay)
                 continue
             else:
                 break
         except Exception:
-            time.sleep(intervalo_segundos)
+            time.sleep(delay)
             continue
 
-    return extrair_dados_suframa_cnpja({}, cnpj)
+    return processar_json_cnpja({})
 
 # Upload dos XMLs
 st.subheader("📤 Upload dos Arquivos XML")
@@ -173,7 +194,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Consultando CNPJá API (Aguardando processamento completo) [{index + 1}/{total_files}]: {file.name}")
+        status_text.text(f"Consultando fonte SUFRAMA na CNPJá API (Aguardando resposta) [{index + 1}/{total_files}]: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -198,11 +219,11 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # 1. BUSCA DA INSCRIÇÃO SUFRAMA NA API CNPJÁ COM ESPERA ATIVA DE ATÉ 40 SEGUNDOS
-            dados_cnpja = consultar_api_cnpja_com_espera(cnpj_dest)
+            # 1. BUSCA EXCLUSIVA DA INSCRIÇÃO SUFRAMA NA API DO CNPJÁ
+            dados_cnpja = consultar_suframa_cnpja_api(cnpj_dest)
             isuf_api = dados_cnpja["isuf"]
 
-            # LÓGICA RIGOROSA DE COMPARATIVO DA INSCRIÇÃO SUFRAMA
+            # LÓGICA DE VALIDAÇÃO (XML x CNPJá API)
             isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
             isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
 
@@ -223,7 +244,7 @@ if uploaded_files:
                     isuf_exibicao = "NÃO INFORMADO NO XML"
                     status_valida_isuf = "🔴 AUSENTE NO XML (Não localizado no CNPJá)"
 
-            # 2. ANÁLISE INTERNA DA OBRIGATORIEDADE DO PIN REALIZADA PELO SCRIPT PYTHON
+            # 2. ANÁLISE INTERNA DA OBRIGATORIEDADE DO PIN PELO PYTHON (ITEM A ITEM)
             detalhes = infNFe.get('det', [])
             if not isinstance(detalhes, list):
                 detalhes = [detalhes]
@@ -246,7 +267,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra do PIN por Origem (0, 3, 4, 5, 8) e Destino ZFM
+                # Regra do PIN-e por Origem (0, 3, 4, 5, 8) e Destino ZFM
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
