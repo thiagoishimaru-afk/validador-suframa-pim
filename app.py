@@ -46,9 +46,11 @@ else:
 st.sidebar.subheader("Painel de Controle")
 st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA e Validação do PIN-e.")
 
-# Campo de Token
+# TOKEN PADRÃO DA VIRBAC (CONFIGURADO AUTOMATICAMENTE)
+TOKEN_DEFAULT = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92ba-dfa2143724df"
+
 st.sidebar.subheader("🔑 Autenticação API")
-TOKEN_CNPJA = st.sidebar.text_input("Cole seu Token CNPJá:", type="password")
+TOKEN_CNPJA = st.sidebar.text_input("Token CNPJá (Configurado):", value=TOKEN_DEFAULT, type="password")
 
 # Cabeçalho do Topo
 st.markdown("""
@@ -58,55 +60,62 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Função para consultar na CNPJá com tratamento flexível de JSON
+# Função para consultar a CNPJá API varrendo a estrutura completa de inscrições
 @st.cache_data(ttl=3600)
-def consultar_cnpja_api(cnpj, token=""):
+def consultar_cnpja_api(cnpj, token):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {"isuf": "N/D", "situacao": "CNPJ INVÁLIDO", "dt_cad": "N/D"}
     
-    if not token:
-        return {"isuf": "SEM TOKEN API", "situacao": "HABILITADO", "dt_cad": "N/D"}
-
+    token_final = token.strip() if token else TOKEN_DEFAULT
     url = f"https://api.cnpja.com/office/{cnpj_limpo}"
-    headers = {"Authorization": token.strip()}
+    
+    headers = {
+        "Authorization": token_final
+    }
 
     try:
         response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             dados = response.json()
             
-            # Mapeamento dinâmico para varrer possíveis caminhos do JSON da CNPJá
-            suframa_info = dados.get('suframa') or dados.get('SUFRAMA') or {}
-            
-            isuf = suframa_info.get('number') or suframa_info.get('inscricao') or suframa_info.get('codigo')
-            situacao = suframa_info.get('status') or suframa_info.get('situacao') or "HABILITADO"
-            dt_cad = suframa_info.get('registrationDate') or suframa_info.get('dataCadastro') or "N/D"
-            
-            # Se a chave da Suframa não estiver no nó raiz, procura dentro das inscrições estaduais/especiais
-            if not isuf:
-                registros = dados.get('registrations', []) or dados.get('inscricoes', [])
+            isuf_encontrado = None
+            situacao_suframa = "HABILITADO"
+            dt_cad = "N/D"
+
+            # 1. Procura no nó exclusivo da SUFRAMA
+            suframa_data = dados.get('suframa') or dados.get('suframaRegistration') or {}
+            if isinstance(suframa_data, dict) and suframa_data.get('number'):
+                isuf_encontrado = suframa_data.get('number')
+                situacao_suframa = suframa_data.get('status', 'HABILITADO')
+                dt_cad = suframa_data.get('registrationDate', 'N/D')
+
+            # 2. Se não achou no nó raiz, varre o array de "registrations" (Inscrições Estaduais / Especiais)
+            if not isuf_encontrado:
+                registros = dados.get('registrations', [])
                 for reg in registros:
-                    if 'SUFRAMA' in str(reg).upper():
-                        isuf = reg.get('number') or reg.get('numero')
+                    tipo = str(reg.get('type', '')).upper()
+                    nome_tipo = str(reg.get('name', '')).upper()
+                    if 'SUFRAMA' in tipo or 'SUFRAMA' in nome_tipo:
+                        isuf_encontrado = reg.get('number')
+                        situacao_suframa = reg.get('status', 'HABILITADO')
                         break
 
-            isuf_str = str(isuf) if isuf else "NÃO LOCALIZADO NA API"
-            sit_str = str(situacao).upper()
-            
-            is_ativo = "ACTIVE" in sit_str or "HABILITAD" in sit_str or "ATIVA" in sit_str or sit_str == "TRUE"
-            
+            # Status Cadastral Geral do CNPJ
+            status_empresa = dados.get('status', {}).get('text', 'ATIVA').upper()
+            is_ativo = "ATIV" in status_empresa or "HABILITAD" in str(situacao_suframa).upper()
+
             return {
-                "isuf": isuf_str,
-                "situacao": "HABILITADO" if is_ativo else sit_str,
+                "isuf": str(isuf_encontrado) if isuf_encontrado else "NÃO CADASTRADO",
+                "situacao": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
                 "dt_cad": dt_cad
             }
         elif response.status_code in [401, 403]:
-            return {"isuf": "TOKEN INVÁLIDO/EXPIRADO", "situacao": "HABILITADO", "dt_cad": "N/D"}
+            return {"isuf": "ERRO TOKEN (401/403)", "situacao": "HABILITADO", "dt_cad": "N/D"}
         else:
-            return {"isuf": "ERRO NA API", "situacao": "HABILITADO", "dt_cad": "N/D"}
+            return {"isuf": f"ERRO API ({response.status_code})", "situacao": "HABILITADO", "dt_cad": "N/D"}
     except Exception:
-        return {"isuf": "TIMEOUT CNPJÁ", "situacao": "HABILITADO", "dt_cad": "N/D"}
+        return {"isuf": "TIMEOUT API", "situacao": "HABILITADO", "dt_cad": "N/D"}
 
 # Upload dos XMLs
 st.subheader("📤 Upload dos Arquivos XML")
@@ -132,7 +141,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Consultando CNPJá e processando arquivo {index + 1} de {total_files}: {file.name}")
+        status_text.text(f"Consultando CNPJá API e processando arquivo {index + 1} de {total_files}: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -157,27 +166,29 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # CONSULTA CNPJá
+            # CONSULTA NA API CNPJÁ
             dados_cnpja = consultar_cnpja_api(cnpj_dest, TOKEN_CNPJA)
             isuf_api = dados_cnpja["isuf"]
 
-            # TRATAMENTO DE VALIDAÇÃO E EXIBIÇÃO
+            # LÓGICA DE VALIDAÇÃO DA INSCRIÇÃO
             isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
             isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
 
             if isuf_xml not in ['Não informado', '', None]:
                 isuf_exibicao = isuf_xml
                 if isuf_api_limpo != "" and isuf_api_limpo == isuf_xml_limpo:
-                    status_valida_isuf = "🟢 VÁLIDO (XML coincide com a API)"
+                    status_valida_isuf = "🟢 VÁLIDO (XML coincide com a API CNPJá)"
+                elif isuf_api_limpo != "" and isuf_api != "NÃO CADASTRADO":
+                    status_valida_isuf = f"🔴 DIVERGENTE (XML: {isuf_xml} | API: {isuf_api})"
                 else:
-                    status_valida_isuf = "🟢 VÁLIDO (Informado no XML)"
+                    status_valida_isuf = "🟢 INFORMADO NO XML"
             else:
                 if isuf_api_limpo != "":
                     isuf_exibicao = isuf_api
-                    status_valida_isuf = "🟡 BUSCADO NA API (Ausente no XML)"
+                    status_valida_isuf = "🟡 BUSCADO NA API CNPJá (Preenchido no XML ausente)"
                 else:
                     isuf_exibicao = "NÃO INFORMADO NO XML"
-                    status_valida_isuf = "🔴 AUSENTE NO XML (Verificar no CADSUF)"
+                    status_valida_isuf = "🔴 AUSENTE NO XML (CNPJ sem cadastro na API)"
 
             # Processamento dos Itens
             detalhes = infNFe.get('det', [])
@@ -202,7 +213,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra de PIN
+                # Regra de PIN por Produto (Origens 0, 3, 4, 5 e 8)
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
@@ -268,7 +279,7 @@ if uploaded_files:
     df_nf = pd.DataFrame(relatorio_nfs)
 
     with tab1:
-        st.subheader("📋 Análise Item a Item (Validação SUFRAMA & PIN)")
+        st.subheader("📋 Análise Item a Item (Integração Oficial CNPJá API)")
         st.dataframe(df_prod, use_container_width=True)
         
         csv_prod = df_prod.to_csv(index=False).encode('utf-8')
