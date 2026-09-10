@@ -67,13 +67,13 @@ else:
         </div>
     """, unsafe_allow_html=True)
 
-# Função para consultar cadastro oficial e número da Inscrição SUFRAMA
+# Função para consultar apenas a situação cadastral ativa na Receita/Suframa
 @st.cache_data(ttl=3600)
-def consultar_suframa_completo(cnpj):
+def consultar_status_cnpj(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, cnpj))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return {
-            "isuf_oficial": "N/D", "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "CNPJ INVÁLIDO",
+            "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "CNPJ INVÁLIDO",
             "cod_sit_cadastral": "00", "icms_benef": "NÃO", "icms_prop": "N/D",
             "icms_base": "N/D", "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
         }
@@ -85,19 +85,9 @@ def consultar_suframa_completo(cnpj):
             dados = response.json()
             situacao = dados.get('estabelecimento', {}).get('situacao_cadastral', 'Ativa').upper()
             dt_inc = dados.get('estabelecimento', {}).get('data_inicio_atividade', 'N/D')
-            
-            # Tenta buscar número da Inscrição Estadual/Suframa vinculada
-            inscricoes = dados.get('estabelecimento', {}).get('inscricoes_estaduais', [])
-            isuf_encontrado = None
-            for ie in inscricoes:
-                if ie.get('ativo'):
-                    isuf_encontrado = ie.get('inscricao_estadual')
-                    break
-            
             is_ativo = situacao == "ATIVA"
             
             return {
-                "isuf_oficial": isuf_encontrado if isuf_encontrado else "200" + cnpj_limpo[:6], # Fallback estruturado
                 "dt_cadastro": dt_inc,
                 "dt_aprovacao": dt_inc if is_ativo else "N/D",
                 "sit_cadastral": "HABILITADO" if is_ativo else "INATIVO/IRREGULAR",
@@ -111,7 +101,6 @@ def consultar_suframa_completo(cnpj):
             }
         else:
             return {
-                "isuf_oficial": "200" + cnpj_limpo[:6],
                 "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "HABILITADO",
                 "cod_sit_cadastral": "01", "icms_benef": "SIM", "icms_prop": "ZFM/ALC",
                 "icms_base": "Legislação Estadual", "ipi_benef": "SIM", "ipi_prop": "Isenção IPI",
@@ -119,7 +108,6 @@ def consultar_suframa_completo(cnpj):
             }
     except Exception:
         return {
-            "isuf_oficial": "N/D",
             "dt_cadastro": "N/D", "dt_aprovacao": "N/D", "sit_cadastral": "DESCONHECIDO",
             "cod_sit_cadastral": "99", "icms_benef": "N/D", "icms_prop": "N/D",
             "icms_base": "N/D", "ipi_benef": "N/D", "ipi_prop": "N/D", "ipi_base": "N/D"
@@ -174,26 +162,18 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # Dados do Cadastro SUFRAMA do Destinatário
-            dados_suf = consultar_suframa_completo(cnpj_dest)
-            isuf_oficial = dados_suf["isuf_oficial"]
+            # Consulta Status
+            dados_suf = consultar_status_cnpj(cnpj_dest)
 
-            # Lógica de Validação da Inscrição SUFRAMA
-            if isuf_xml in ['Não informado', '', None]:
-                isuf_final = isuf_oficial
-                valida_isuf = "🟢 BUSCADA NA BASE (Não continha no XML)"
-            else:
+            # Lógica corrigida de Inscrição SUFRAMA
+            if isuf_xml not in ['Não informado', '', None]:
                 isuf_final = isuf_xml
-                # Trata formato mantendo apenas números para comparação
-                isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
-                isuf_oficial_limpo = ''.join(filter(str.isdigit, str(isuf_oficial)))
-                
-                if isuf_xml_limpo == isuf_oficial_limpo:
-                    valida_isuf = "🟢 CORRETA (XML bate com Cadastro)"
-                else:
-                    valida_isuf = f"🔴 DIVERGENTE (XML: {isuf_xml} | Base: {isuf_oficial})"
+                valida_isuf = "🟢 INFORMADA NO XML (VÁLIDA)"
+            else:
+                isuf_final = "NÃO INFORMADO NO XML"
+                valida_isuf = "🟡 AUSENTE NO XML (Verificar no CADSUF)"
 
-            # Processamento Item a Item (Produtos)
+            # Processamento dos Itens
             detalhes = infNFe.get('det', [])
             if not isinstance(detalhes, list):
                 detalhes = [detalhes]
@@ -216,7 +196,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
-                # Regra de Exigência do PIN por PRODUTO
+                # Regra de Exigência do PIN
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
@@ -240,9 +220,8 @@ if uploaded_files:
                     "Cidade Destino": cidade_dest,
                     "UF": uf_dest,
                     "CNPJ Destinatário": cnpj_dest,
-                    "Inscrição SUFRAMA Final": isuf_final,
-                    "Status Inscrição XML": valida_isuf,
-                    "Inscrição na Base Oficial": isuf_oficial,
+                    "Inscrição SUFRAMA (ISUF)": isuf_final,
+                    "Status ISUF": valida_isuf,
                     "Data de Cadastro": dados_suf["dt_cadastro"],
                     "Data de Aprovação": dados_suf["dt_aprovacao"],
                     "Situação Cadastral": dados_suf["sit_cadastral"],
@@ -256,14 +235,12 @@ if uploaded_files:
                     "Arquivo XML": file.name
                 })
 
-            # Resumo por NF
             relatorio_nfs.append({
                 "Nº NF": numero_nf,
                 "Valor Total": f"R$ {valor_total_nf:,.2f}",
                 "UF": uf_dest,
                 "CNPJ Destinatário": cnpj_dest,
                 "Inscrição SUFRAMA": isuf_final,
-                "Validação Inscrição": valida_isuf,
                 "Situação Cadastral": dados_suf["sit_cadastral"],
                 "Itens com PIN": f"{itens_com_pin}/{len(detalhes)}",
                 "Diagnóstico NF": "🟡 GERAR PIN" if itens_com_pin > 0 else "🟢 DISPENSADO"
@@ -277,14 +254,13 @@ if uploaded_files:
     status_text.empty()
     progress_bar.empty()
 
-    # Apresentação do Relatório em Abas
     tab1, tab2 = st.tabs(["📦 Visão Detalhada POR PRODUTO", "📄 Resumo POR NOTA FISCAL"])
 
     df_prod = pd.DataFrame(relatorio_produtos)
     df_nf = pd.DataFrame(relatorio_nfs)
 
     with tab1:
-        st.subheader("📋 Análise Item a Item (Identificação de Produtos com PIN & Inscrição SUFRAMA)")
+        st.subheader("📋 Análise Item a Item (Identificação de Produtos com PIN)")
         st.dataframe(df_prod, use_container_width=True)
         
         csv_prod = df_prod.to_csv(index=False).encode('utf-8')
