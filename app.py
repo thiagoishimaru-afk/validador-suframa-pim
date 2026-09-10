@@ -3,6 +3,7 @@ import xmltodict
 import requests
 import pandas as pd
 import os
+import time
 
 # Configuração da Página
 st.set_page_config(
@@ -57,17 +58,14 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Função para extrair dados da SUFRAMA diretamente do padrão JSON da CNPJá
+# Função para extrair a estrutura exata do JSON devolvido pelo CNPJá
 def extrair_dados_suframa_cnpja(json_data, cnpj_alvo):
     cnpj_alvo_limpo = ''.join(filter(str.isdigit, str(cnpj_alvo)))
-    
-    # Se a resposta for uma Lista (Array JSON da consulta em massa)
     itens = json_data if isinstance(json_data, list) else [json_data]
     
     for item in itens:
         tax_id = ''.join(filter(str.isdigit, str(item.get('taxId', ''))))
         
-        # Localiza o registro do CNPJ correspondente
         if not cnpj_alvo_limpo or tax_id == cnpj_alvo_limpo or len(itens) == 1:
             list_suframa = item.get('suframa', [])
             
@@ -78,11 +76,10 @@ def extrair_dados_suframa_cnpja(json_data, cnpj_alvo):
                 status_obj = suf.get('status', {})
                 status_txt = status_obj.get('text', 'Ativa') if isinstance(status_obj, dict) else str(status_obj)
                 
-                # Extrai Benefícios e Bases Legais (ICMS / IPI)
-                incentivos = suf.get('incentives', [])
                 icms_benef, icms_prop, icms_base = "NÃO", "N/D", "N/D"
                 ipi_benef, ipi_prop, ipi_base = "NÃO", "N/D", "N/D"
                 
+                incentivos = suf.get('incentives', [])
                 for inc in incentivos:
                     tributo = str(inc.get('tribute', '')).upper()
                     if tributo == 'ICMS':
@@ -99,18 +96,20 @@ def extrair_dados_suframa_cnpja(json_data, cnpj_alvo):
                     "situacao": "HABILITADO" if status_txt.upper() in ["ATIVA", "HABILITADO"] else status_txt.upper(),
                     "dt_cad": since[:10] if since != 'N/D' else 'N/D',
                     "icms_benef": icms_benef, "icms_prop": icms_prop, "icms_base": icms_base,
-                    "ipi_benef": ipi_benef, "ipi_prop": ipi_prop, "ipi_base": ipi_base
+                    "ipi_benef": ipi_benef, "ipi_prop": ipi_prop, "ipi_base": ipi_base,
+                    "encontrado": True if number else False
                 }
 
     return {
         "isuf": "", "situacao": "HABILITADO", "dt_cad": "N/D",
         "icms_benef": "NÃO", "icms_prop": "N/D", "icms_base": "N/D",
-        "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D"
+        "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D",
+        "encontrado": False
     }
 
-# Função de Chamada da API CNPJá
+# Função de Chamada com Polling e Espera Ativa de até 40 segundos
 @st.cache_data(ttl=3600)
-def consultar_api_cnpja(cnpj):
+def consultar_api_cnpja_com_espera(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return extrair_dados_suframa_cnpja({}, cnpj)
@@ -118,13 +117,35 @@ def consultar_api_cnpja(cnpj):
     url = f"https://api.cnpja.com/office/{cnpj_limpo}"
     headers = {"Authorization": TOKEN_CONFIGURADO}
 
-    try:
-        response = requests.get(url, headers=headers, timeout=12)
-        if response.status_code == 200:
-            dados = response.json()
-            return extrair_dados_suframa_cnpja(dados, cnpj_limpo)
-    except Exception:
-        pass
+    # Polling: Tenta 8 vezes com intervalo de 5 segundos entre cada consulta (Total: 40 segundos)
+    max_tentativas = 8
+    intervalo_segundos = 5
+
+    for tentativa in range(max_tentativas):
+        try:
+            response = requests.get(url, headers=headers, timeout=12)
+            if response.status_code == 200:
+                dados = response.json()
+                resultado = extrair_dados_suframa_cnpja(dados, cnpj_limpo)
+                
+                # Se encontrou os dados da SUFRAMA no JSON, encerra a busca e retorna imediatamente
+                if resultado["encontrado"]:
+                    return resultado
+                
+                # Se ainda não encontrou e não atingiu o limite de tentativas, aguarda o CNPJá concluir a raspagem
+                if tentativa < max_tentativas - 1:
+                    time.sleep(intervalo_segundos)
+                    continue
+
+            elif response.status_code == 202:
+                # HTTP 202: A API do CNPJá sinaliza que a consulta ainda está sendo processada no governo
+                time.sleep(intervalo_segundos)
+                continue
+            else:
+                break
+        except Exception:
+            time.sleep(intervalo_segundos)
+            continue
 
     return extrair_dados_suframa_cnpja({}, cnpj)
 
@@ -152,7 +173,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Consultando CNPJá API e processando arquivo {index + 1} de {total_files}: {file.name}")
+        status_text.text(f"Consultando CNPJá API (Aguardando processamento completo) [{index + 1}/{total_files}]: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -177,8 +198,8 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # 1. BUSCA EXCLUSIVA DA SUFRAMA NA API CNPJÁ
-            dados_cnpja = consultar_api_cnpja(cnpj_dest)
+            # 1. BUSCA DA INSCRIÇÃO SUFRAMA NA API CNPJÁ COM ESPERA ATIVA DE ATÉ 40 SEGUNDOS
+            dados_cnpja = consultar_api_cnpja_com_espera(cnpj_dest)
             isuf_api = dados_cnpja["isuf"]
 
             # LÓGICA RIGOROSA DE COMPARATIVO DA INSCRIÇÃO SUFRAMA
@@ -202,7 +223,7 @@ if uploaded_files:
                     isuf_exibicao = "NÃO INFORMADO NO XML"
                     status_valida_isuf = "🔴 AUSENTE NO XML (Não localizado no CNPJá)"
 
-            # 2. ANÁLISE DO PIN PELO PYTHON (PRODUTO POR PRODUTO)
+            # 2. ANÁLISE INTERNA DA OBRIGATORIEDADE DO PIN REALIZADA PELO SCRIPT PYTHON
             detalhes = infNFe.get('det', [])
             if not isinstance(detalhes, list):
                 detalhes = [detalhes]
