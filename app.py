@@ -3,7 +3,6 @@ import xmltodict
 import requests
 import pandas as pd
 import os
-import time
 import json
 
 # Configuração da Página
@@ -55,73 +54,69 @@ TOKEN_CONFIGURADO = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92b
 st.markdown("""
     <div class="main-header">
         <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-        <div class="main-subtitle">Análise por Produto, Diagnóstico PIN-e e Visualizador de Dados CNPJá</div>
+        <div class="main-subtitle">Análise por Produto, Diagnóstico PIN-e e Consulta Oficial CNPJá API</div>
     </div>
 """, unsafe_allow_html=True)
 
-# Função para extrair dados da SUFRAMA diretamente da estrutura JSON enviada pela CNPJá
-def extrair_detalhes_cnpja(json_data, cnpj_alvo):
+# Função para mapear o JSON retornado pela API CNPJá
+def processar_json_cnpja(item, cnpj_alvo):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj_alvo)))
-    itens = json_data if isinstance(json_data, list) else [json_data]
     
-    for item in itens:
-        if isinstance(item, dict):
-            tax_id = ''.join(filter(str.isdigit, str(item.get('taxId', ''))))
+    if isinstance(item, dict):
+        company = item.get('company', {})
+        razao_social = company.get('name', item.get('alias', 'N/D'))
+        status_empresa = item.get('status', {}).get('text', 'Ativa')
+        
+        # Mapeia o nó oficial "suframa"
+        list_suframa = item.get('suframa', [])
+        
+        if list_suframa and len(list_suframa) > 0:
+            suf = list_suframa[0]
+            number = suf.get('number', '')
+            since = suf.get('since', 'N/D')
+            status_obj = suf.get('status', {})
+            status_txt = status_obj.get('text', 'Ativa') if isinstance(status_obj, dict) else str(status_obj)
             
-            if not cnpj_limpo or tax_id == cnpj_limpo or len(itens) == 1:
-                company = item.get('company', {})
-                razao_social = company.get('name', item.get('alias', 'N/D'))
-                status_empresa = item.get('status', {}).get('text', 'Ativa')
-                
-                list_suframa = item.get('suframa', [])
-                
-                if list_suframa and len(list_suframa) > 0:
-                    suf = list_suframa[0]
-                    number = suf.get('number', '')
-                    since = suf.get('since', 'N/D')
-                    status_obj = suf.get('status', {})
-                    status_txt = status_obj.get('text', 'Ativa') if isinstance(status_obj, dict) else str(status_obj)
-                    
-                    icms_benef, icms_prop, icms_base = "NÃO", "N/D", "N/D"
-                    ipi_benef, ipi_prop, ipi_base = "NÃO", "N/D", "N/D"
-                    
-                    incentivos = suf.get('incentives', [])
-                    for inc in incentivos:
-                        tributo = str(inc.get('tribute', '')).upper()
-                        if tributo == 'ICMS':
-                            icms_benef = "SIM"
-                            icms_prop = inc.get('purpose', 'N/D')
-                            icms_base = inc.get('basis', 'N/D')
-                        elif tributo == 'IPI':
-                            ipi_benef = "SIM"
-                            ipi_prop = inc.get('purpose', 'N/D')
-                            ipi_base = inc.get('basis', 'N/D')
+            icms_benef, icms_prop, icms_base = "NÃO", "N/D", "N/D"
+            ipi_benef, ipi_prop, ipi_base = "NÃO", "N/D", "N/D"
+            
+            incentivos = suf.get('incentives', [])
+            for inc in incentivos:
+                tributo = str(inc.get('tribute', '')).upper()
+                if tributo == 'ICMS':
+                    icms_benef = "SIM"
+                    icms_prop = inc.get('purpose', 'N/D')
+                    icms_base = inc.get('basis', 'N/D')
+                elif tributo == 'IPI':
+                    ipi_benef = "SIM"
+                    ipi_prop = inc.get('purpose', 'N/D')
+                    ipi_base = inc.get('basis', 'N/D')
 
-                    return {
-                        "cnpj": tax_id,
-                        "razao_social": razao_social,
-                        "status_empresa": status_empresa,
-                        "isuf": str(number) if number else "",
-                        "situacao_suframa": status_txt.upper(),
-                        "dt_cad": since[:10] if since != 'N/D' else 'N/D',
-                        "icms_benef": icms_benef, "icms_prop": icms_prop, "icms_base": icms_base,
-                        "ipi_benef": ipi_benef, "ipi_prop": ipi_prop, "ipi_base": ipi_base,
-                        "json_bruto": item,
-                        "sucesso": True if number else False
-                    }
-                else:
-                    return {
-                        "cnpj": tax_id,
-                        "razao_social": razao_social,
-                        "status_empresa": status_empresa,
-                        "isuf": "",
-                        "situacao_suframa": "SEM REGISTRO SUFRAMA",
-                        "dt_cad": "N/D",
-                        "icms_benef": "NÃO", "icms_prop": "N/D", "icms_base": "N/D",
-                        "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D",
-                        "json_bruto": item,
-                        "sucesso": False
-                    }
+            return {
+                "cnpj": cnpj_limpo,
+                "razao_social": razao_social,
+                "status_empresa": status_empresa,
+                "isuf": str(number) if number else "",
+                "situacao_suframa": status_txt.upper(),
+                "dt_cad": since[:10] if since != 'N/D' else 'N/D',
+                "icms_benef": icms_benef, "icms_prop": icms_prop, "icms_base": icms_base,
+                "ipi_benef": ipi_benef, "ipi_prop": ipi_prop, "ipi_base": ipi_base,
+                "json_bruto": item,
+                "sucesso": True if number else False
+            }
+        else:
+            return {
+                "cnpj": cnpj_limpo,
+                "razao_social": razao_social,
+                "status_empresa": status_empresa,
+                "isuf": "",
+                "situacao_suframa": "SEM REGISTRO SUFRAMA",
+                "dt_cad": "N/D",
+                "icms_benef": "NÃO", "icms_prop": "N/D", "icms_base": "N/D",
+                "ipi_benef": "NÃO", "ipi_prop": "N/D", "ipi_base": "N/D",
+                "json_bruto": item,
+                "sucesso": False
+            }
 
     return {
         "cnpj": cnpj_limpo, "razao_social": "N/D", "status_empresa": "N/D",
@@ -131,48 +126,28 @@ def extrair_detalhes_cnpja(json_data, cnpj_alvo):
         "json_bruto": {}, "sucesso": False
     }
 
-# Consulta na API CNPJá com Polling de até 40s (8 ciclos x 5s)
+# Função de Chamada API com o Parâmetro Oficial ?suframa=true
 @st.cache_data(ttl=3600)
 def consultar_suframa_cnpja_api(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
-        return extrair_detalhes_cnpja({}, cnpj)
+        return processar_json_cnpja({}, cnpj)
     
-    url = f"https://api.cnpja.com/office/{cnpj_limpo}?strategy=cache&maxAge=45&sources=suframa"
+    # URL correta da documentação oficial com ?suframa=true
+    url = f"https://api.cnpja.com/office/{cnpj_limpo}?suframa=true&strategy=CACHE_IF_ERROR"
     headers = {"Authorization": TOKEN_CONFIGURADO}
 
-    max_tentativas = 8
-    delay = 5
+    try:
+        response = requests.get(url, headers=headers, timeout=12)
+        if response.status_code == 200:
+            dados = response.json()
+            return processar_json_cnpja(dados, cnpj_limpo)
+        elif response.status_code in [401, 429]:
+            st.error(f"Erro na API CNPJá (Código {response.status_code}): Verificar chave/créditos.")
+    except Exception as e:
+        pass
 
-    for tentativa in range(max_tentativas):
-        try:
-            response = requests.get(url, headers=headers, timeout=12)
-            
-            if response.status_code in [400, 404]:
-                url_fallback = f"https://api.cnpja.com/office/{cnpj_limpo}"
-                response = requests.get(url_fallback, headers=headers, timeout=12)
-
-            if response.status_code == 200:
-                dados = response.json()
-                resultado = extrair_detalhes_cnpja(dados, cnpj_limpo)
-                
-                if resultado["sucesso"]:
-                    return resultado
-                
-                if tentativa < max_tentativas - 1:
-                    time.sleep(delay)
-                    continue
-
-            elif response.status_code == 202:
-                time.sleep(delay)
-                continue
-            else:
-                break
-        except Exception:
-            time.sleep(delay)
-            continue
-
-    return extrair_detalhes_cnpja({}, cnpj)
+    return processar_json_cnpja({}, cnpj)
 
 # Upload dos XMLs
 st.subheader("📤 Upload dos Arquivos XML")
@@ -199,7 +174,7 @@ if uploaded_files:
     total_files = len(uploaded_files)
 
     for index, file in enumerate(uploaded_files):
-        status_text.text(f"Consultando fonte SUFRAMA na CNPJá API [{index + 1}/{total_files}]: {file.name}")
+        status_text.text(f"Consultando SUFRAMA na CNPJá API [{index + 1}/{total_files}]: {file.name}")
         
         try:
             data = xmltodict.parse(file.read())
@@ -224,11 +199,11 @@ if uploaded_files:
             cidade_dest = ender_dest.get('xMun', 'N/D')
             uf_dest = ender_dest.get('UF', 'N/D')
 
-            # 1. CONSULTA NA API CNPJÁ
+            # 1. CONSULTA COM PARÂMETRO OFICIAL ?suframa=true
             dados_cnpja = consultar_suframa_cnpja_api(cnpj_dest)
             isuf_api = dados_cnpja["isuf"]
 
-            # Guarda para a nova aba de Dados Brutos
+            # Guarda para a aba de inspeção técnica do JSON
             relatorio_cnpja.append({
                 "Nº NF": numero_nf,
                 "CNPJ Destinatário": cnpj_dest,
@@ -243,7 +218,7 @@ if uploaded_files:
                 "Estrutura JSON Bruta": json.dumps(dados_cnpja["json_bruto"], ensure_ascii=False, indent=2)
             })
 
-            # LÓGICA DE VALIDAÇÃO (XML x CNPJá API)
+            # LÓGICA RIGOROSA DE COMPARATIVO DE INSCRIÇÃO (XML x CNPJá API)
             isuf_xml_limpo = ''.join(filter(str.isdigit, str(isuf_xml)))
             isuf_api_limpo = ''.join(filter(str.isdigit, str(isuf_api)))
 
@@ -264,7 +239,7 @@ if uploaded_files:
                     isuf_exibicao = "NÃO INFORMADO NO XML"
                     status_valida_isuf = "🔴 AUSENTE NO XML (Não localizado no CNPJá)"
 
-            # 2. ANÁLISE INTERNA DO PIN ITEM A ITEM
+            # 2. ANÁLISE DO PIN PELO PYTHON (ITEM A ITEM)
             detalhes = infNFe.get('det', [])
             if not isinstance(detalhes, list):
                 detalhes = [detalhes]
@@ -287,6 +262,7 @@ if uploaded_files:
                         origem = str(v.get('orig', 'N/D'))
                         break
 
+                # Regra do PIN por Origem (0, 3, 4, 5, 8) e Destino ZFM
                 is_nacional = origem in origens_nacionais
                 if uf_dest not in ufs_suframa:
                     status_pin_prod = "🟢 DISPENSADO (Fora ZFM)"
@@ -345,7 +321,7 @@ if uploaded_files:
     status_text.empty()
     progress_bar.empty()
 
-    # ABAS DA INTERFACE (PRODUTO, NOTA FISCAL E CNPJÁ SUFRAMA)
+    # ABAS DA INTERFACE
     tab1, tab2, tab3 = st.tabs([
         "📦 Visão Detalhada POR PRODUTO", 
         "📄 Resumo POR NOTA FISCAL", 
@@ -377,10 +353,8 @@ if uploaded_files:
         st.subheader("🔍 Retorno Oficial da API CNPJá (Módulo SUFRAMA)")
         st.info("Esta aba exibe exatamente o que a API do CNPJá entregou para cada CNPJ pesquisado.")
         
-        # Exibe a tabela formatada dos dados recebidos
         st.dataframe(df_cnpja.drop(columns=["Estrutura JSON Bruta"]), use_container_width=True)
         
-        # Expander para inspecionar a árvore do JSON recebido por nota
         st.markdown("---")
         st.subheader("🌳 Inspeção do JSON Recebido por CNPJ")
         for item in relatorio_cnpja:
