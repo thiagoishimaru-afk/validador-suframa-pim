@@ -37,8 +37,11 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Logo Virbac
+# TOKEN CONFIGURADO DA VIRBAC
+TOKEN_CONFIGURADO = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92ba-dfa2143724df"
 NOME_ARQUIVO_LOGO = "logo.jpg"
+
+# Logo na Barra Lateral
 if os.path.exists(NOME_ARQUIVO_LOGO):
     st.sidebar.image(NOME_ARQUIVO_LOGO, width=180)
 else:
@@ -47,16 +50,25 @@ else:
 st.sidebar.subheader("Painel de Controle")
 st.sidebar.info("Módulo de Consulta Automatizada da SUFRAMA via CNPJá e Validação do PIN-e.")
 
-# TOKEN CONFIGURADO DA VIRBAC
-TOKEN_CONFIGURADO = "6990e991-24ae-4dff-99ae-ede83c192f80-9445ff19-2f86-4d58-92ba-dfa2143724df"
-
-# Cabeçalho do Topo
-st.markdown("""
-    <div class="main-header">
-        <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
-        <div class="main-subtitle">Análise por Produto, Diagnóstico PIN-e e Consulta Oficial CNPJá API</div>
-    </div>
-""", unsafe_allow_html=True)
+# Cabeçalho com Logo no Topo
+if os.path.exists(NOME_ARQUIVO_LOGO):
+    col_logo, col_tit = st.columns([1, 4])
+    with col_logo:
+        st.image(NOME_ARQUIVO_LOGO, width=140)
+    with col_tit:
+        st.markdown("""
+            <div class="main-header">
+                <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
+                <div class="main-subtitle">Análise por Produto, Diagnóstico PIN-e e Consulta Oficial CNPJá API</div>
+            </div>
+        """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+        <div class="main-header">
+            <div class="main-title">VIRBAC | Validador Fiscal ZFM & SUFRAMA</div>
+            <div class="main-subtitle">Análise por Produto, Diagnóstico PIN-e e Consulta Oficial CNPJá API</div>
+        </div>
+    """, unsafe_allow_html=True)
 
 # Função para mapear o JSON retornado pela API CNPJá
 def processar_json_cnpja(item, cnpj_alvo):
@@ -67,7 +79,6 @@ def processar_json_cnpja(item, cnpj_alvo):
         razao_social = company.get('name', item.get('alias', 'N/D'))
         status_empresa = item.get('status', {}).get('text', 'Ativa')
         
-        # Mapeia o nó oficial "suframa"
         list_suframa = item.get('suframa', [])
         
         if list_suframa and len(list_suframa) > 0:
@@ -133,7 +144,6 @@ def consultar_suframa_cnpja_api(cnpj):
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return processar_json_cnpja({}, cnpj)
     
-    # URL correta da documentação oficial com ?suframa=true
     url = f"https://api.cnpja.com/office/{cnpj_limpo}?suframa=true&strategy=CACHE_IF_ERROR"
     headers = {"Authorization": TOKEN_CONFIGURADO}
 
@@ -144,7 +154,7 @@ def consultar_suframa_cnpja_api(cnpj):
             return processar_json_cnpja(dados, cnpj_limpo)
         elif response.status_code in [401, 429]:
             st.error(f"Erro na API CNPJá (Código {response.status_code}): Verificar chave/créditos.")
-    except Exception as e:
+    except Exception:
         pass
 
     return processar_json_cnpja({}, cnpj)
