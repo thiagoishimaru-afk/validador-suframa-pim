@@ -1,20 +1,3 @@
-"suframa": [
-  {
-    "number": "200145711",
-    "since": "2018-09-03",
-    "status": {"id": 1, "text": "Ativa"},
-    "incentives": [...]
-  }
-]
-```[cite: 2]
-
----
-
-### **Código Definitivo e Ajustado (`app.py`)**
-
-Substitua todo o conteúdo do seu `app.py` no GitHub por este código. Ele faz a chamada à API solicitando o módulo da SUFRAMA via parâmetro de URL e possui um mecanismo de **retentativa com espera de 40 segundos** caso o servidor da CNPJá esteja processando a busca no governo em tempo real.
-
-```python
 import streamlit as st
 import xmltodict
 import requests
@@ -121,18 +104,16 @@ def processar_json_cnpja(json_data):
         "sucesso": False
     }
 
-# Consulta na API CNPJá forçando a fonte da SUFRAMA e executando Polling de até 40s
+# Consulta na API CNPJá com Polling de até 40s
 @st.cache_data(ttl=3600)
 def consultar_suframa_cnpja_api(cnpj):
     cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
     if not cnpj_limpo or len(cnpj_limpo) != 14:
         return processar_json_cnpja({})
     
-    # URL configurada com parâmetro para forçar a raspagem do módulo SUFRAMA
     url = f"https://api.cnpja.com/office/{cnpj_limpo}?strategy=cache&maxAge=45&sources=suframa"
     headers = {"Authorization": TOKEN_CONFIGURADO}
 
-    # Polling: 8 ciclos de 5 segundos = 40 segundos de tempo limite
     max_tentativas = 8
     delay = 5
 
@@ -140,7 +121,6 @@ def consultar_suframa_cnpja_api(cnpj):
         try:
             response = requests.get(url, headers=headers, timeout=12)
             
-            # Se a rota com parâmetros falhar por conta do plano, faz fallback para o nó padrão /office/
             if response.status_code in [400, 404]:
                 url_fallback = f"https://api.cnpja.com/office/{cnpj_limpo}"
                 response = requests.get(url_fallback, headers=headers, timeout=12)
@@ -149,17 +129,14 @@ def consultar_suframa_cnpja_api(cnpj):
                 dados = response.json()
                 resultado = processar_json_cnpja(dados)
                 
-                # Se encontrou a Inscrição SUFRAMA, encerra o loop e retorna imediatamente
                 if resultado["sucesso"]:
                     return resultado
                 
-                # Se o CNPJá está processando a raspagem em segundo plano, aguarda 5 segundos
                 if tentativa < max_tentativas - 1:
                     time.sleep(delay)
                     continue
 
             elif response.status_code == 202:
-                # Código 202: A API do CNPJá está aguardando o retorno do governo
                 time.sleep(delay)
                 continue
             else:
